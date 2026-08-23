@@ -1,0 +1,6 @@
+/target
+Cargo.lock.orig
+shots/
+*.log
+.DS_Store
+shots/

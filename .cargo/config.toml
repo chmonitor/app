@@ -1,0 +1,4 @@
+# Pin binutils ar explicitly: some developer environments shadow it on PATH,
+# which breaks native builds of crypto dependencies (ring, aws-lc-sys).
+[env]
+AR = "/usr/bin/ar"
