@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint-test:
+    name: lint + test (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev pkg-config \
+            libfontconfig1-dev libvulkan1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: chmonitor-ci
+          cache-on-failure: true
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Workspace tests
+        run: cargo test --workspace
+
+  build-matrix:
+    name: debug build (${{ matrix.os }})
+    needs: lint-test
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, macos-13]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev pkg-config \
+            libfontconfig1-dev libvulkan1 \
+            xvfb imagemagick mesa-vulkan-drivers
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: chmonitor-ci
+          key: ${{ matrix.os }}
+
+      # Compile-only smoke proof that chm-app builds cross-platform.
+      # (macOS renders via Metal natively; Linux links fontconfig/xkbcommon.)
+      - name: Debug build (compile smoke)
+        run: cargo build --locked -p chm-app
+
+      - name: Verify binary exists
+        run: test -x target/debug/chm-app
+
+      - name: Upload debug binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: chm-app-debug-${{ matrix.os }}
+          path: target/debug/chm-app
+          retention-days: 3
+          if-no-files-found: error
+
+  e2e:
+    name: e2e smoke (linux, xvfb)
+    needs: lint-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev pkg-config \
+            libfontconfig1-dev libvulkan1 \
+            xvfb imagemagick mesa-vulkan-drivers
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: chmonitor-ci
+          key: e2e
+
+      - name: Build app
+        run: cargo build --locked -p chm-app
+
+      - name: Run GUI smoke under Xvfb
+        run: scripts/smoke.sh
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: shots/
+          retention-days: 7
+          if-no-files-found: warn

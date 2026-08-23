@@ -1,0 +1,28 @@
+name: Release Please
+
+# Maintains a release PR (changelog + version bumps) and, once that PR is
+# merged, pushes the vX.Y.Z[-pre.N] tag which triggers release.yml.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          # GitHub App token recommended so the release PR re-triggers
+          # required CI workflows; falls back to github.token otherwise.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
