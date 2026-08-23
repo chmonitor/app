@@ -1,0 +1,344 @@
+name: Release
+
+# Fires on prerelease-style version tags (v*.*.*-suffix, e.g. v0.2.0-beta.1)
+# and on manual dispatch. Stable publishes are driven either by a plain
+# vX.Y.Z tag via workflow_dispatch (pass `tag`) or by dispatching on the tag
+# itself.
+#
+# Channel rule:
+#   - dispatch input `channel`, when set, decides (stable | beta);
+#   - otherwise a "-" in the tag (semver prerelease suffix) => BETA;
+#   - otherwise STABLE.
+#
+# RELEASE_NOTE (optional repository variable, Settings > Secrets and
+# variables > Actions > Variables) supplies the notes field of the update
+# manifests and the release body prefix.
+on:
+  push:
+    tags:
+      - 'v*.*.*-*'
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Release channel'
+        type: choice
+        options: [stable, beta]
+        default: stable
+        required: true
+      tag:
+        description: 'Existing tag to publish (e.g. v0.2.1). Required for dispatches not run on a tag ref.'
+        type: string
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BIN_NAME: chm-app
+  APP_NAME: chmonitor
+
+jobs:
+  channel:
+    name: Detect channel
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.detect.outputs.channel }}
+      tag: ${{ steps.detect.outputs.tag }}
+      version: ${{ steps.detect.outputs.version }}
+      prerelease: ${{ steps.detect.outputs.prerelease }}
+    steps:
+      - name: Detect channel from tag / dispatch input
+        id: detect
+        env:
+          INPUT_CHANNEL: ${{ inputs.channel || '' }}
+          INPUT_TAG: ${{ inputs.tag || '' }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # On a tag push the tag is the ref; on a dispatch it must be given
+          # (or the dispatch must be run against a tag ref).
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          elif [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.].+)?$ ]]; then
+            TAG="$REF_NAME"
+          else
+            echo "::error::No tag: set the 'tag' input (e.g. v0.2.1) when dispatching off a branch." >&2
+            exit 1
+          fi
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+.].+)?$ ]] || {
+            echo "::error::'$TAG' is not a vMAJOR.MINOR.PATCH[-pre][+build] tag." >&2
+            exit 1
+          }
+          # Rule: dispatch input wins; else a "-" prerelease suffix => beta.
+          # Semver prerelease identifiers never contain "-", build metadata
+          # never precedes it, so "tag contains -" <=> prerelease tag.
+          # Version policy: releases stay within v0.1.x while the app
+          # stabilizes; anything else is rejected here.
+          [[ "$TAG" =~ ^v0\.1\.[0-9]+([-+.].+)?$ ]] || {
+            echo "::error::'$TAG' outside the supported v0.1.x range." >&2
+            exit 1
+          }
+          if [ -n "$INPUT_CHANNEL" ]; then
+            CHANNEL="$INPUT_CHANNEL"
+          elif [[ "$TAG" == *-* ]]; then
+            CHANNEL="beta"
+          else
+            CHANNEL="stable"
+          fi
+          if [ "$CHANNEL" = "beta" ]; then PRERELEASE=true; else PRERELEASE=false; fi
+          {
+            echo "channel=$CHANNEL"
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build (${{ matrix.os }} / ${{ matrix.target }})
+    needs: channel
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            cross: false
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            cross: true           # built with cross-rs
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            cross: false
+          - os: macos-13
+            target: x86_64-apple-darwin
+            cross: false
+    env:
+      # Per-target dir so native and cross layouts match:
+      # target/<triple>/<profile>/chm-app
+      CARGO_TARGET_DIR: target/${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.channel.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-rs
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      # Native Linux builds link fontconfig/xkbcommon/vulkan-loader directly;
+      # the aarch64 sysroot deps come from the cross Docker image instead.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux' && !matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev pkg-config \
+            libfontconfig1-dev libvulkan1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: chmonitor-release
+          key: ${{ matrix.target }}
+
+      # Beta channel builds with [profile.beta] (inherits release);
+      # stable builds with [profile.release]. Always pass --target so the
+      # artifact path is identical for native and cross builds.
+      - name: Build (${{ needs.channel.outputs.channel }} profile)
+        env:
+          CHANNEL: ${{ needs.channel.outputs.channel }}
+          TARGET: ${{ matrix.target }}
+          USE_CROSS: ${{ matrix.cross }}
+        run: |
+          set -euo pipefail
+          if [ "$CHANNEL" = "beta" ]; then PROFILE=beta; else PROFILE=release; fi
+          echo "PROFILE=$PROFILE" >> "$GITHUB_ENV"
+          if [ "$USE_CROSS" = "true" ]; then
+            cross build --locked --profile "$PROFILE" -p chm-app --target "$TARGET"
+          else
+            cargo build --locked --profile "$PROFILE" -p chm-app --target "$TARGET"
+          fi
+
+      # ---- Package: linux -> tar.gz (binary + README), macos -> zip .app ----
+      - name: Package (linux tar.gz)
+        if: runner.os == 'Linux'
+        env:
+          TAG: ${{ needs.channel.outputs.tag }}
+          VERSION: ${{ needs.channel.outputs.version }}
+        run: |
+          set -euo pipefail
+          STAGE="stage/chmonitor-$TAG-$TARGET"
+          mkdir -p "$STAGE"
+          cp "target/$TARGET/$PROFILE/$BIN_NAME" "$STAGE/chm-app"
+          chmod +x "$STAGE/chm-app"
+          cp README.md "$STAGE/README.md"
+          tar -czf "chmonitor-$TAG-$TARGET.tar.gz" -C stage .
+          rm -rf stage
+
+      - name: Package (macos .app bundle zip)
+        if: runner.os == 'macOS'
+        env:
+          TAG: ${{ needs.channel.outputs.tag }}
+          VERSION: ${{ needs.channel.outputs.version }}
+        run: |
+          set -euo pipefail
+          APP_BUNDLE="$APP_NAME.app"
+          mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
+          cp "target/$TARGET/$PROFILE/$BIN_NAME" "$APP_BUNDLE/Contents/MacOS/$BIN_NAME"
+          chmod +x "$APP_BUNDLE/Contents/MacOS/$BIN_NAME"
+          cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>$APP_NAME</string>
+            <key>CFBundleDisplayName</key><string>$APP_NAME</string>
+            <key>CFBundleIdentifier</key><string>io.chmonitor.desktop</string>
+            <key>CFBundleVersion</key><string>$VERSION</string>
+            <key>CFBundleShortVersionString</key><string>$VERSION</string>
+            <key>CFBundleExecutable</key><string>$BIN_NAME</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          printf 'chmonitor %s (%s)\n' "$TAG" "$TARGET" > "$APP_BUNDLE/Contents/Resources/README.txt"
+          zip -qry "chmonitor-$TAG-$TARGET.zip" "$APP_BUNDLE"
+          rm -rf "$APP_BUNDLE"
+
+      # SHA256 of the raw packaged binary feeds the update manifests;
+      # PKG is the archive attached to the release.
+      - name: Binary sha256 + package name
+        id: meta
+        env:
+          TAG: ${{ needs.channel.outputs.tag }}
+        run: |
+          set -euo pipefail
+          SHA="$(sha256sum "target/$TARGET/$PROFILE/$BIN_NAME" | cut -d' ' -f1)"
+          if [ "${{ runner.os }}" = "Linux" ]; then EXT=tar.gz; else EXT=zip; fi
+          PKG="chmonitor-$TAG-$TARGET.$EXT"
+          test -f "$PKG"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "package=$PKG" >> "$GITHUB_OUTPUT"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.target }}
+          path: ${{ steps.meta.outputs.package }}
+          retention-days: 5
+          if-no-files-found: error
+
+      # One line per target for the manifest emitter:
+      #   target|package-filename|sha256-of-binary
+      - name: Emit build record
+        run: |
+          mkdir -p dist/build-records
+          echo "${{ matrix.target }}|${{ steps.meta.outputs.package }}|${{ steps.meta.outputs.sha256 }}" \
+            >> dist/build-records/build-outputs.txt
+
+      - name: Upload build record
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-record-${{ matrix.target }}
+          path: dist/build-records/build-outputs.txt
+          retention-days: 5
+          if-no-files-found: error
+
+  release:
+    name: Publish release + update manifests
+    needs: [channel, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download packages and build records
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '{pkg-,build-record-}*'
+          path: artifacts
+
+      - name: Consolidate build records
+        run: |
+          sort -u artifacts/build-record-*/build-outputs.txt > build-outputs.txt
+          cat build-outputs.txt
+
+      # Update manifests for the auto-updater (chm-update): one JSON per
+      # channel under dist/manifests/, attached to the GitHub release so
+      # clients can fetch e.g.
+      # https://github.com/<repo>/releases/latest/download/stable.json
+      #
+      # Shape (single object; list when several targets ship):
+      # {"version": .., "url": .., "notes": .., "sha256": .., "date": ..}
+      - name: Generate channel update manifests
+        env:
+          TAG: ${{ needs.channel.outputs.tag }}
+          VERSION: ${{ needs.channel.outputs.version }}
+          CHANNEL: ${{ needs.channel.outputs.channel }}
+          REPO: ${{ github.repository }}
+          RELEASE_NOTE: ${{ vars.RELEASE_NOTE }}
+        run: |
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+
+          tag = os.environ["TAG"]
+          version = os.environ["VERSION"]
+          channel = os.environ["CHANNEL"]
+          base = f"https://github.com/{os.environ['REPO']}/releases/download/{tag}"
+          note = os.environ.get("RELEASE_NOTE") or ""
+          date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+          entries = []
+          with open("build-outputs.txt", encoding="utf-8") as fh:
+              for line in fh:
+                  line = line.strip()
+                  if not line:
+                      continue
+                  target, package, sha = line.split("|")
+                  entries.append({
+                      "version": version,
+                      "url": f"{base}/{package}",
+                      "notes": note,
+                      "sha256": sha,
+                      "date": date,
+                      "target": target,
+                  })
+          if not entries:
+              raise SystemExit("no build records found")
+
+          os.makedirs("dist/manifests", exist_ok=True)
+          out = f"dist/manifests/{channel}.json"
+          with open(out, "w", encoding="utf-8") as fh:
+              json.dump(entries[0] if len(entries) == 1 else entries, fh, indent=2)
+              fh.write("\n")
+          print(f"wrote {out}")
+          for e in entries:
+              print(f"  {e['target']} -> {e['url']} (sha256={e['sha256']})")
+          PY
+
+      - name: Create GitHub release and attach assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.channel.outputs.tag }}
+          name: ${{ needs.channel.outputs.tag }} (${{ needs.channel.outputs.channel }})
+          body: |
+            ${{ vars.RELEASE_NOTE }}
+            Channel: **${{ needs.channel.outputs.channel }}**
+          draft: false
+          prerelease: ${{ needs.channel.outputs.prerelease }}
+          generate_release_notes: true
+          files: |
+            artifacts/pkg-*/chmonitor-*
+            dist/manifests/*.json
