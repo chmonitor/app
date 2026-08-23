@@ -1,9 +1,9 @@
 {
   "packages": {
-    ".": {
+    "app": {
       "release-type": "rust",
       "package-name": "chmonitor-desktop",
-      "extra-files": ["app/Cargo.toml"]
+      "extra-files": ["Cargo.toml"]
     }
   },
   "include-component-in-tag": false
