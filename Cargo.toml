@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/chm-core",
+    "crates/chm-cloud-api",
+    "crates/chm-clickhouse",
+    "crates/chm-update",
+    "crates/chm-telemetry",
+    "app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+# internal
+chm-core = { path = "crates/chm-core" }
+chm-cloud-api = { path = "crates/chm-cloud-api" }
+chm-clickhouse = { path = "crates/chm-clickhouse" }
+chm-update = { path = "crates/chm-update" }
+chm-telemetry = { path = "crates/chm-telemetry" }
+
+# bezel stack — pinned to exact revs; all gpui types flow through bezel::gpui.
+bezel = { git = "https://github.com/crabtalk/bezel", rev = "f86dbbfc84569cc69f3cba6ebb3d99d858dcb259" }
+gpui = { git = "https://github.com/crabtalk/zed", rev = "cf1b90ec8cfda974a50b0c9eaebfdab28d7f0423", version = "0.2.2" }
+gpui_platform = { git = "https://github.com/crabtalk/zed", rev = "cf1b90ec8cfda974a50b0c9eaebfdab28d7f0423", features = ["font-kit", "x11"] }
+
+# crates-io
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+dirs = "6"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+semver = { version = "1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.beta]
+inherits = "release"
+debug = false
+
+[profile.smoke]
+inherits = "dev"
+opt-level = 1
