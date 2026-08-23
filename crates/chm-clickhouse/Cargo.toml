@@ -1,0 +1,22 @@
+[package]
+name = "chm-clickhouse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# DEVIATION (flagged): chm_core's public types embed chrono::DateTime<Utc>
+# (QueryRow.started_at, TableStat.last_modified, TimeRange::window), so any
+# DataSource implementor must name chrono types. Already pinned + built
+# workspace-wide; no new supply-chain surface.
+chrono.workspace = true
+chm-core.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+wiremock = "0.6"
