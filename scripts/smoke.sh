@@ -9,6 +9,7 @@ set -euo pipefail
 DISPLAY_NUM="${1:-${DISPLAY:-:1}}"
 SHOTS_DIR="${SHOTS_DIR:-shots}"
 WAIT_SECS=6
+XVFB_PID=""
 
 log() { printf '[smoke] %s\n' "$*"; }
 fail() { printf '[smoke] FAIL: %s\n' "$*" >&2; exit 1; }
@@ -16,8 +17,14 @@ fail() { printf '[smoke] FAIL: %s\n' "$*" >&2; exit 1; }
 command -v cargo >/dev/null || fail "cargo not on PATH"
 
 # --- preflight ---------------------------------------------------------------
-if [ -z "${DISPLAY:-}" ] && ! command -v xvfb-run >/dev/null; then
-    fail "no DISPLAY and no xvfb-run"
+if [ -z "${DISPLAY:-}" ]; then
+    command -v Xvfb >/dev/null || fail "no DISPLAY and no Xvfb"
+    DISPLAY_NUM=":99"
+    Xvfb "$DISPLAY_NUM" -screen 0 1440x900x24 >/dev/null 2>&1 &
+    XVFB_PID=$!
+    export DISPLAY="$DISPLAY_NUM"
+    sleep 1
+    log "started Xvfb on $DISPLAY (pid $XVFB_PID)"
 fi
 
 shot_tool=""
@@ -31,16 +38,8 @@ for t in wmctrl xdotool; do
     if command -v "$t" >/dev/null; then wm_tool="$t"; break; fi
 done
 
-mkdir -p "$SHOTS_DIR"
-
 # --- launch ------------------------------------------------------------------
-RUNNER=(env CHM_SMOKE=1)
-if [ -n "${DISPLAY:-}" ]; then
-    RUNNER+=(DISPLAY="$DISPLAY_NUM")
-else
-    log "no DISPLAY — using xvfb-run"
-    RUNNER=(xvfb-run -a -s "-screen 0 1440x900x24" env CHM_SMOKE=1)
-fi
+mkdir -p "$SHOTS_DIR"
 
 log "building debug binary…"
 cargo build -p chm-app
@@ -49,9 +48,9 @@ BIN="target/debug/chm-app"
 [ -x "$BIN" ] || fail "binary missing at $BIN"
 
 LOG="$(mktemp /tmp/chm-smoke.XXXXXX.log)"
-"${RUNNER[@]}" RUST_LOG=info "$BIN" >"$LOG" 2>&1 &
+env CHM_SMOKE=1 RUST_LOG=info "$BIN" >"$LOG" 2>&1 &
 APP_PID=$!
-trap 'kill $APP_PID 2>/dev/null || true' EXIT
+trap 'kill $APP_PID $XVFB_PID 2>/dev/null || true' EXIT
 
 sleep "$WAIT_SECS"
 kill -0 "$APP_PID" 2>/dev/null || { tail -30 "$LOG"; fail "app exited early"; }
@@ -81,13 +80,13 @@ esac
 shot() {
     local name="$1" out="$SHOTS_DIR/$1.png"
     case "$shot_tool" in
-        import)          DISPLAY="$DISPLAY_NUM" import -window root "$out" 2>/dev/null ;;
-        scrot)           DISPLAY="$DISPLAY_NUM" scrot -o "$out" 2>/dev/null ;;
-        gnome-screenshot) DISPLAY="$DISPLAY_NUM" gnome-screenshot -f "$out" 2>/dev/null ;;
+        import)          import -window root "$out" || return 1 ;;
+        scrot)           scrot -o "$out" || return 1 ;;
+        gnome-screenshot) gnome-screenshot -f "$out" || return 1 ;;
     esac
 }
 
-shot "01-connect-or-overview"
+shot "01-connect-or-overview" || fail "screenshot failed on $DISPLAY"
 PAGES=("02-overview" "03-queries" "04-merges" "05-replicas" "06-health" "07-tables" "08-traffic")
 
 # Page switching is keyboard-driven when supported (keys 1..8 bound in shell);
