@@ -1,7 +1,7 @@
 //! App shell — window layout, sidebar nav, page routing, status bar,
 //! 30-second poll loop and the startup update-check hook.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 
 use chm_core::{
@@ -11,18 +11,18 @@ use chm_core::{
 
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
-    KeyBinding, KeyDownEvent, MouseButton, Render, SharedString, WeakEntity, Window, actions, div,
-    prelude::*, px, relative,
+    Image, ImageFormat, ImageSource, KeyBinding, KeyDownEvent, MouseButton, Render, SharedString,
+    WeakEntity, Window, actions, div, img, prelude::*, px, relative,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Root, Sizable as _, TitleBar,
+    ActiveTheme as _, Icon, IconName, Root, Selectable as _, Sizable as _, TitleBar,
     button::{Button, ButtonVariants as _},
     h_flex, h_resizable,
     menu::{DropdownMenu as _, PopupMenuItem},
     resizable_panel,
+    separator::Separator,
     sidebar::{
-        Sidebar, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem,
-        SidebarToggleButton,
+        Sidebar, SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuItem, SidebarToggleButton,
     },
     spinner::Spinner,
     status_bar::StatusBar,
@@ -57,6 +57,13 @@ const COMPACT_BELOW: f32 = 900.0;
 const SIDEBAR_W: f32 = 176.0;
 const SIDEBAR_W_MIN: f32 = 140.0;
 const SIDEBAR_W_MAX: f32 = 360.0;
+
+static APP_ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
+    Arc::new(Image::from_bytes(
+        ImageFormat::Png,
+        include_bytes!("../../assets/icon/icon-1024.png").to_vec(),
+    ))
+});
 
 fn clamp_sidebar_width(width: f32) -> f32 {
     width.clamp(SIDEBAR_W_MIN, SIDEBAR_W_MAX)
@@ -780,33 +787,34 @@ impl Shell {
         }
     }
 
+    fn host_engine_label(&self) -> &'static str {
+        match self.source_engine() {
+            SourceEngine::Postgres => "PostgreSQL",
+            SourceEngine::ClickHouse => "ClickHouse",
+            SourceEngine::Cloud => "Cloud API",
+            SourceEngine::Mock => "Mock",
+        }
+    }
+
+    fn app_icon(&self, compact: bool) -> impl IntoElement {
+        let size = if compact { px(16.) } else { px(24.) };
+        img(ImageSource::Image(APP_ICON.clone()))
+            .size(size)
+            .rounded(px(6.))
+            .flex_shrink_0()
+            .object_fit(gpui::ObjectFit::Cover)
+    }
+
     // -- rendering ----------------------------------------------------------
 
     fn render_sidebar(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let engine = self.source_engine();
-        let active_host = self.active_host.clone();
+        let entity = cx.entity().downgrade();
         let hosts = self.hosts();
-
-        let mut host_menu = SidebarMenu::new();
-        for host in hosts {
-            let id = host.id.clone();
-            let selected = active_host.as_deref() == Some(id.as_str());
-            let icon = Self::host_icon(host.profile.mode.as_deref());
-            host_menu = host_menu.child(
-                SidebarMenuItem::new(host.label.clone())
-                    .icon(icon)
-                    .active(selected)
-                    .on_click(cx.listener(move |this, _, _, cx| this.switch_host(id.clone(), cx))),
-            );
-        }
-        host_menu = host_menu.child(
-            SidebarMenuItem::new("Add host")
-                .icon(IconName::Plus)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.page = Page::Connect;
-                    cx.notify();
-                })),
-        );
+        let host_label = self.active_host_label();
+        let engine_label = self.host_engine_label();
+        let active = self.active_host.clone();
+        let muted = cx.theme().muted_foreground;
 
         let mut nav = SidebarMenu::new();
         for (i, page) in Page::ALL
@@ -815,15 +823,15 @@ impl Shell {
             .filter(|page| page.available(engine))
             .enumerate()
         {
-            let active = page == self.page;
+            let active_page = page == self.page;
             let hotkey = format!("{}", i + 1);
             nav = nav.child(
                 SidebarMenuItem::new(page.title())
                     .icon(page.icon())
-                    .active(active)
+                    .active(active_page)
                     .suffix({
                         let hotkey = hotkey.clone();
-                        let muted = cx.theme().muted_foreground;
+                        let muted = muted;
                         move |_, _| div().text_xs().text_color(muted).child(hotkey.clone())
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.goto(page, cx))),
@@ -836,8 +844,106 @@ impl Shell {
             .when(compact, |sb| sb.w(px(self.sidebar_width)))
             .when(!compact, |sb| sb.w(relative(1.)))
             .header(
-                SidebarHeader::new().child(
-                    h_flex().w_full().items_center().justify_between().child(
+                SidebarHeader::new()
+                    .child(self.app_icon(compact))
+                    .when(!compact, |header| {
+                        header.child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .line_height(relative(1.25))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_ellipsis()
+                                        .child(host_label.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .text_ellipsis()
+                                        .child(engine_label),
+                                ),
+                        )
+                    })
+                    .when(!compact, |header| {
+                        header.child(Icon::new(IconName::ChevronsUpDown).size_4().flex_shrink_0())
+                    })
+                    .dropdown_menu(move |menu, _, _| {
+                        let mut menu = menu;
+                        for host in &hosts {
+                            let id = host.id.clone();
+                            let entity = entity.clone();
+                            let selected = active.as_deref() == Some(id.as_str());
+                            menu = menu.item(
+                                PopupMenuItem::new(host.label.clone())
+                                    .icon(Self::host_icon(host.profile.mode.as_deref()))
+                                    .checked(selected)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = entity.update(cx, |this, cx| {
+                                            this.switch_host(id.clone(), cx)
+                                        });
+                                    }),
+                            );
+                        }
+                        let entity = entity.clone();
+                        menu.separator().item(
+                            PopupMenuItem::new("Add host")
+                                .icon(IconName::Plus)
+                                .on_click(move |_, _, cx| {
+                                    let _ = entity.update(cx, |this, cx| {
+                                        this.page = Page::Connect;
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    }),
+            )
+            .child(nav)
+            .footer(
+                SidebarFooter::new()
+                    .justify_between()
+                    .child(
+                        Button::new("sidebar-settings")
+                            .ghost()
+                            .compact()
+                            .icon(Icon::new(IconName::Settings))
+                            .when(!compact, |btn| btn.label("Settings"))
+                            .selected(self.page == Page::Settings)
+                            .tooltip("Settings")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.page = Page::Settings;
+                                cx.notify();
+                            })),
+                    )
+                    .when(!compact, |footer| {
+                        footer.child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                        )
+                    }),
+            )
+    }
+
+    fn render_title_bar(
+        &self,
+        compact: bool,
+        show_range: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let fetching = self.fetching;
+        let muted = cx.theme().muted_foreground;
+        TitleBar::new()
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
                         SidebarToggleButton::new()
                             .collapsed(compact)
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -846,83 +952,8 @@ impl Shell {
                                     cx,
                                 );
                             })),
-                    ),
-                ),
-            )
-            .child(SidebarGroup::new("Host").child(host_menu))
-            .child(SidebarGroup::new("Monitor").child(nav))
-            .child(
-                SidebarGroup::new("App").child(
-                    SidebarMenu::new().child(
-                        SidebarMenuItem::new(Page::Settings.title())
-                            .icon(Page::Settings.icon())
-                            .active(self.page == Page::Settings)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.page = Page::Settings;
-                                cx.notify();
-                            })),
-                    ),
-                ),
-            )
-            .footer(
-                SidebarFooter::new().child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
-                ),
-            )
-    }
-
-    fn host_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let entity = cx.entity().downgrade();
-        let hosts = self.hosts();
-        let label = self.active_host_label();
-        let active = self.active_host.clone();
-        Button::new("host-switch")
-            .ghost()
-            .compact()
-            .xsmall()
-            .label(label)
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for host in &hosts {
-                    let id = host.id.clone();
-                    let entity = entity.clone();
-                    let selected = active.as_deref() == Some(id.as_str());
-                    menu = menu.item(
-                        PopupMenuItem::new(host.label.clone())
-                            .icon(Self::host_icon(host.profile.mode.as_deref()))
-                            .checked(selected)
-                            .on_click(move |_, _, cx| {
-                                let _ =
-                                    entity.update(cx, |this, cx| this.switch_host(id.clone(), cx));
-                            }),
-                    );
-                }
-                let entity = entity.clone();
-                menu.separator().item(
-                    PopupMenuItem::new("Add host")
-                        .icon(IconName::Plus)
-                        .on_click(move |_, _, cx| {
-                            let _ = entity.update(cx, |this, cx| {
-                                this.page = Page::Connect;
-                                cx.notify();
-                            });
-                        }),
-                )
-            })
-    }
-
-    fn render_title_bar(&self, show_range: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let fetching = self.fetching;
-        let muted = cx.theme().muted_foreground;
-        TitleBar::new()
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
+                    )
+                    .child(Separator::vertical().h_4())
                     .child(
                         div()
                             .text_sm()
@@ -940,7 +971,6 @@ impl Shell {
                     .gap_2()
                     .px_2()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(self.host_switcher(cx))
                     .when(show_range, |row| row.child(self.range_bar(cx)))
                     .child({
                         let dark =
@@ -958,19 +988,7 @@ impl Shell {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.toggle_dark(window, cx);
                             }))
-                    })
-                    .child(
-                        Button::new("open-settings")
-                            .ghost()
-                            .compact()
-                            .xsmall()
-                            .icon(Icon::new(IconName::Settings))
-                            .tooltip("Settings")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.page = Page::Settings;
-                                cx.notify();
-                            })),
-                    ),
+                    }),
             )
     }
 
@@ -1198,7 +1216,7 @@ impl Render for Shell {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.render_title_bar(show_range, cx))
+            .child(self.render_title_bar(compact, show_range, cx))
             .child(split)
             .child(self.status_bar(cx))
             .children(Root::render_notification_layer(window, cx))
