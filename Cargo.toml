@@ -25,7 +25,10 @@ chm-telemetry = { path = "crates/chm-telemetry" }
 # bezel stack — pinned to exact revs; all gpui types flow through bezel::gpui.
 bezel = { git = "https://github.com/crabtalk/bezel", rev = "f86dbbfc84569cc69f3cba6ebb3d99d858dcb259" }
 gpui = { git = "https://github.com/crabtalk/zed", rev = "cf1b90ec8cfda974a50b0c9eaebfdab28d7f0423", version = "0.2.2" }
-gpui_platform = { git = "https://github.com/crabtalk/zed", rev = "cf1b90ec8cfda974a50b0c9eaebfdab28d7f0423", features = ["font-kit", "x11"] }
+# runtime_shaders compiles Metal shaders at launch so `cargo build` works on a
+# Mac that only has Command Line Tools (no Xcode `metal` compiler). Prefer the
+# precompiled path when Xcode is installed — drop this feature then.
+gpui_platform = { git = "https://github.com/crabtalk/zed", rev = "cf1b90ec8cfda974a50b0c9eaebfdab28d7f0423", features = ["font-kit", "x11", "runtime_shaders"] }
 
 # crates-io
 anyhow = "1"
