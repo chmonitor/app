@@ -15,13 +15,37 @@ cargo build -p chm-app            # debug
 cargo build --release -p chm-app  # release (LTO, stripped)
 ```
 
+### macOS
+
+GPUI paints with Metal. Full Xcode ships the `metal` compiler used to
+precompile shaders at build time. This workspace enables
+`gpui_platform/runtime_shaders` so a Mac with only Command Line Tools
+(`xcode-select -p` → `/Library/Developer/CommandLineTools`) can still
+`cargo build -p chm-app`; shaders compile on first launch instead.
+
+To precompile shaders (faster startup) once Xcode is installed:
+
+```sh
+sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+xcodebuild -downloadComponent MetalToolchain   # Xcode 26+
+```
+
+Then drop `runtime_shaders` from the `gpui_platform` features in the
+workspace `Cargo.toml`.
+
 ## Run
 
 ```sh
 cargo run -p chm-app -- --connect          # open Connect screen
+cargo run -p chm-app -- --help
 CHM_SMOKE=1 cargo run -p chm-app           # built-in fixture data, no network
 CHM_PROFILE=work cargo run -p chm-app      # named saved profile
+CHM_CONFIG=/tmp/chmonitor.toml cargo run -p chm-app
 ```
+
+Named profiles live under `[profiles.<name>]` in `config.toml`; the
+default connection is `[profile]`. `r` refreshes the current page;
+keys `1`–`8` switch sidebar destinations.
 
 ## Layout
 
@@ -40,6 +64,7 @@ CHM_PROFILE=work cargo run -p chm-app      # named saved profile
 ```sh
 cargo test --workspace        # unit + wiremock + SQL snapshots
 scripts/smoke.sh              # GUI smoke on Linux desktop (display :1)
+scripts/smoke-mac.sh          # GUI smoke on macOS (CHM_SMOKE=1 + screenshot)
 ```
 
 CI runs lint (`fmt` + `clippy -D warnings`), the workspace tests, a
