@@ -10,17 +10,20 @@ use chm_core::{
 };
 
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, Focusable, Hsla, KeyBinding,
-    KeyDownEvent, Render, SharedString, WeakEntity, Window, actions, div, prelude::*, px,
+    App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
+    KeyBinding, KeyDownEvent, MouseButton, Render, SharedString, WeakEntity, Window, actions, div,
+    prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Root, Sizable as _,
+    ActiveTheme as _, Icon, IconName, Root, Sizable as _, TitleBar,
     button::{Button, ButtonVariants as _},
     h_flex,
+    menu::{DropdownMenu as _, PopupMenuItem},
     sidebar::{
         Sidebar, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem,
         SidebarToggleButton,
     },
+    spinner::Spinner,
     status_bar::StatusBar,
     v_flex,
 };
@@ -50,7 +53,7 @@ const POLL_SECS: u64 = 30;
 /// Viewport width below which the sidebar collapses to an icon strip.
 const COMPACT_BELOW: f32 = 900.0;
 /// Sidebar width expanded / collapsed.
-const SIDEBAR_W: f32 = 190.0;
+const SIDEBAR_W: f32 = 176.0;
 
 /// Perf metrics live for the whole process; recording is gated by
 /// `[telemetry] enabled=true` in config.toml (never on by default).
@@ -230,7 +233,11 @@ impl Shell {
             } else {
                 UpdateUi::Disabled
             },
-            sidebar_collapsed: None,
+            sidebar_collapsed: if load_config().ui.compact_sidebar {
+                Some(true)
+            } else {
+                None
+            },
             active_host,
             host_status: HostStatus::default(),
             fetching: false,
@@ -828,7 +835,114 @@ impl Shell {
                     ),
                 ),
             )
-            .footer(SidebarFooter::new().child("chmonitor"))
+            .footer(
+                SidebarFooter::new().child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                ),
+            )
+    }
+
+    fn host_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity().downgrade();
+        let hosts = self.hosts();
+        let label = self.active_host_label();
+        let active = self.active_host.clone();
+        Button::new("host-switch")
+            .ghost()
+            .compact()
+            .xsmall()
+            .label(label)
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu;
+                for host in &hosts {
+                    let id = host.id.clone();
+                    let entity = entity.clone();
+                    let selected = active.as_deref() == Some(id.as_str());
+                    menu = menu.item(
+                        PopupMenuItem::new(host.label.clone())
+                            .icon(Self::host_icon(host.profile.mode.as_deref()))
+                            .checked(selected)
+                            .on_click(move |_, _, cx| {
+                                let _ =
+                                    entity.update(cx, |this, cx| this.switch_host(id.clone(), cx));
+                            }),
+                    );
+                }
+                let entity = entity.clone();
+                menu.separator().item(
+                    PopupMenuItem::new("Add host")
+                        .icon(IconName::Plus)
+                        .on_click(move |_, _, cx| {
+                            let _ = entity.update(cx, |this, cx| {
+                                this.page = Page::Connect;
+                                cx.notify();
+                            });
+                        }),
+                )
+            })
+    }
+
+    fn render_title_bar(&self, show_range: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let fetching = self.fetching;
+        let muted = cx.theme().muted_foreground;
+        TitleBar::new()
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(SharedString::from(self.page.title())),
+                    )
+                    .when(fetching, |row| {
+                        row.child(Spinner::new().xsmall().color(muted))
+                    }),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .px_2()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(self.host_switcher(cx))
+                    .when(show_range, |row| row.child(self.range_bar(cx)))
+                    .child({
+                        let dark =
+                            crate::theme::current_mode(cx) == gpui_component::ThemeMode::Dark;
+                        Button::new("theme-toggle")
+                            .ghost()
+                            .compact()
+                            .xsmall()
+                            .icon(if dark {
+                                Icon::new(IconName::Sun)
+                            } else {
+                                Icon::new(IconName::Moon)
+                            })
+                            .tooltip(if dark { "Light mode" } else { "Dark mode" })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_dark(window, cx);
+                            }))
+                    })
+                    .child(
+                        Button::new("open-settings")
+                            .ghost()
+                            .compact()
+                            .xsmall()
+                            .icon(Icon::new(IconName::Settings))
+                            .tooltip("Settings")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.page = Page::Settings;
+                                cx.notify();
+                            })),
+                    ),
+            )
     }
 
     fn range_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -922,11 +1036,13 @@ impl Shell {
             .child(div().text_color(self.conn.color(cx)).child(status))
             .right({
                 let mut bits = vec![refreshed];
-                if let Some(ms) = self.host_status.fetch_ms {
-                    bits.push(format!("{ms:.0}ms"));
-                }
-                if let Some(rss) = self.host_status.rss_bytes {
-                    bits.push(crate::widgets::geometry::format_bytes(rss));
+                if load_config().ui.show_perf {
+                    if let Some(ms) = self.host_status.fetch_ms {
+                        bits.push(format!("{ms:.0}ms"));
+                    }
+                    if let Some(rss) = self.host_status.rss_bytes {
+                        bits.push(crate::widgets::geometry::format_bytes(rss));
+                    }
                 }
                 bits.join(" · ")
             })
@@ -966,7 +1082,8 @@ impl Render for Shell {
         let compact = sidebar_is_compact(self.sidebar_collapsed, narrow);
         let show_range = self.page.uses_range() && self.source.is_some();
 
-        h_flex()
+        let pad = crate::density::Density::current().content_pad();
+        v_flex()
             .id("shell")
             .key_context("Shell")
             .track_focus(&self.focus)
@@ -1007,59 +1124,26 @@ impl Render for Shell {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.render_sidebar(compact, cx))
+            .child(self.render_title_bar(show_range, cx))
             .child(
-                v_flex()
+                h_flex()
                     .flex_1()
-                    .min_w_0()
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .px_4()
-                            .pt_3()
-                            .pb_1()
-                            .gap_3()
-                            .child(div().text_lg().child(SharedString::from(self.page.title())))
-                            .when(self.fetching, |row| {
-                                row.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child("refreshing"),
-                                )
-                            })
-                            .child(div().flex_1())
-                            .when(show_range, |row| row.child(self.range_bar(cx)))
-                            .child({
-                                let dark = crate::theme::current_mode(cx)
-                                    == gpui_component::ThemeMode::Dark;
-                                Button::new("theme-toggle")
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(if dark {
-                                        Icon::new(IconName::Sun)
-                                    } else {
-                                        Icon::new(IconName::Moon)
-                                    })
-                                    .tooltip(if dark { "Light mode" } else { "Dark mode" })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_dark(window, cx);
-                                    }))
-                            }),
-                    )
+                    .min_h_0()
+                    .child(self.render_sidebar(compact, cx))
                     .child(
                         div()
                             .id("content-scroll")
                             .flex()
                             .flex_col()
                             .flex_1()
+                            .min_w_0()
                             .min_h_0()
-                            .p_4()
+                            .p(px(pad))
                             .overflow_y_scroll()
                             .child(self.content(cx)),
-                    )
-                    .child(self.status_bar(cx)),
+                    ),
             )
+            .child(self.status_bar(cx))
             .children(Root::render_notification_layer(window, cx))
     }
 }

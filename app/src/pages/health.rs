@@ -51,16 +51,17 @@ impl Render for HealthPage {
             "{:.0}%",
             (h.background_pool_utilization * 100.0).clamp(0.0, 999.0)
         );
+        let gap = px(crate::density::Density::current().card_gap());
         div()
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .gap(gap)
             .w_full()
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .gap(px(10.))
+                    .gap(gap)
                     .child(metric_card(
                         "status",
                         if h.ok { "ok" } else { "not ok" },
@@ -94,7 +95,7 @@ impl Render for HealthPage {
                 div()
                     .flex()
                     .flex_row()
-                    .gap(px(10.))
+                    .gap(gap)
                     .child(metric_card(
                         "delayed inserts",
                         &h.delayed_inserts.to_string(),

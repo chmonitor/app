@@ -3,18 +3,25 @@
 use gpui::{App, FontWeight, div, prelude::*, px};
 use gpui_component::ActiveTheme as _;
 
+use crate::density::Density;
+
 /// A stat tile: small muted label, large value, optional muted sub-line.
-pub fn metric_card(label: &str, value: &str, sub: Option<&str>, cx: &App) -> impl IntoElement {
-    let label = label.to_string();
-    let value = value.to_string();
-    let sub = sub.map(str::to_string);
+pub fn metric_card(
+    label: impl Into<String>,
+    value: impl Into<String>,
+    sub: Option<String>,
+    cx: &App,
+) -> impl IntoElement {
+    let label = label.into();
+    let value = value.into();
+    let d = Density::current();
 
     div()
         .flex()
         .flex_col()
-        .gap(px(6.))
-        .p(px(14.))
-        .min_w(px(140.))
+        .gap(px(4.))
+        .p(px(d.card_pad()))
+        .min_w(px(d.card_min_w()))
         .flex_1()
         .bg(cx.theme().background)
         .border_1()
@@ -29,8 +36,8 @@ pub fn metric_card(label: &str, value: &str, sub: Option<&str>, cx: &App) -> imp
         )
         .child(
             div()
-                .text_size(px(26.))
-                .font_weight(FontWeight::BOLD)
+                .text_size(px(d.card_value()))
+                .font_weight(FontWeight::SEMIBOLD)
                 .text_color(cx.theme().foreground)
                 .child(value),
         )

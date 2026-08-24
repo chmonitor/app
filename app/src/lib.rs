@@ -7,6 +7,7 @@
 pub mod cache;
 pub mod config;
 pub mod connect;
+pub mod density;
 pub mod pages;
 pub mod shell;
 pub mod theme;

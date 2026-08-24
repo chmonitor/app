@@ -49,10 +49,14 @@ CHM_CONFIG=/tmp/chmonitor.toml cargo run -p chm-app
 Named profiles live under `[profiles.<name>]` in `config.toml`; the
 default connection is `[profile]`. `r` refreshes the current page;
 keys `1`–`8` switch sidebar destinations; `cmd-b` toggles the sidebar;
-`cmd-,` opens Settings; the sun/moon control in the title bar toggles
-light/dark. Pages restore from a local cache so they paint immediately,
-then refresh; skeletons show when nothing is cached yet. The sidebar host switcher lists `[profile]` plus
-`[profiles.<name>]`; Connect's optional Name field saves a named host.
+`cmd-,` opens Settings. The native title bar holds the host switcher,
+time range, light/dark, and Settings. Overview defaults to compact
+density and the six live-health metrics (qps, running, slow, failed,
+replicas, disk); Settings can restore a roomier layout or pick which
+tiles show. Pages restore from a local cache so they paint immediately,
+then refresh; skeletons show when nothing is cached yet. Hosts are
+`[profile]` plus `[profiles.<name>]`; Connect's optional Name field
+saves a named host.
 
 ## Layout
 

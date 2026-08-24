@@ -4,9 +4,12 @@
 
 use chm_update::Channel;
 use gpui::{App, Context, Render, Window, div, prelude::*, px};
-use gpui_component::{ActiveTheme as _, Theme, ThemeMode, h_flex, v_flex};
+use gpui_component::{
+    ActiveTheme as _, Sizable as _, Theme, ThemeMode, checkbox::Checkbox, h_flex, v_flex,
+};
 
 use crate::config::{config_path, load_config, save_config};
+use crate::density::{Density, OverviewMetric, default_metric_ids};
 use crate::pages::heading;
 use crate::widgets::controls::{choice_radio, radio_group, theme_switch};
 
@@ -39,6 +42,11 @@ impl Appearance {
 
 pub struct SettingsPage {
     appearance: Appearance,
+    density: Density,
+    overview_metrics: Vec<String>,
+    show_chart: bool,
+    compact_sidebar: bool,
+    show_perf: bool,
     channel: Channel,
     telemetry: bool,
     update_enabled: bool,
@@ -55,8 +63,18 @@ impl Default for SettingsPage {
 impl SettingsPage {
     pub fn new() -> Self {
         let cfg = load_config();
+        let overview_metrics = if cfg.ui.overview_metrics.is_empty() {
+            default_metric_ids()
+        } else {
+            cfg.ui.overview_metrics.clone()
+        };
         Self {
             appearance: appearance_from_cfg(cfg.ui.appearance.as_deref()),
+            density: Density::from_cfg(cfg.ui.density.as_deref()),
+            overview_metrics,
+            show_chart: cfg.ui.show_chart,
+            compact_sidebar: cfg.ui.compact_sidebar,
+            show_perf: cfg.ui.show_perf,
             channel: channel_from_cfg(cfg.profile.channel.as_deref()),
             telemetry: cfg.telemetry.enabled,
             update_enabled: cfg.update.enabled,
@@ -68,6 +86,11 @@ impl SettingsPage {
     fn persist(&mut self) {
         let mut cfg = load_config();
         cfg.ui.appearance = Some(appearance_to_cfg(self.appearance).into());
+        cfg.ui.density = Some(self.density.as_str().into());
+        cfg.ui.overview_metrics = self.overview_metrics.clone();
+        cfg.ui.show_chart = self.show_chart;
+        cfg.ui.compact_sidebar = self.compact_sidebar;
+        cfg.ui.show_perf = self.show_perf;
         cfg.profile.channel = Some(self.channel.as_str().into());
         cfg.telemetry.enabled = self.telemetry;
         cfg.update.enabled = self.update_enabled;
@@ -105,6 +128,52 @@ impl SettingsPage {
         self.persist();
         cx.notify();
     }
+
+    fn set_density(&mut self, density: Density, window: &mut Window, cx: &mut Context<Self>) {
+        self.density = density;
+        self.persist();
+        crate::theme::apply_brand(cx);
+        window.refresh();
+        cx.notify();
+    }
+
+    fn set_metric(&mut self, metric: OverviewMetric, on: bool, cx: &mut Context<Self>) {
+        let id = metric.id();
+        if on {
+            if !self.overview_metrics.iter().any(|s| s == id) {
+                self.overview_metrics.push(id.into());
+            }
+        } else {
+            self.overview_metrics.retain(|s| s != id);
+            if self.overview_metrics.is_empty() {
+                self.overview_metrics = default_metric_ids();
+            }
+        }
+        self.persist();
+        cx.notify();
+    }
+
+    fn set_show_chart(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.show_chart = enabled;
+        self.persist();
+        cx.notify();
+    }
+
+    fn set_compact_sidebar(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.compact_sidebar = enabled;
+        self.persist();
+        cx.notify();
+    }
+
+    fn set_show_perf(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.show_perf = enabled;
+        self.persist();
+        cx.notify();
+    }
+
+    fn metric_on(&self, metric: OverviewMetric) -> bool {
+        self.overview_metrics.iter().any(|s| s == metric.id())
+    }
 }
 
 impl Render for SettingsPage {
@@ -113,6 +182,10 @@ impl Render for SettingsPage {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(no config directory)".into());
         let appearance = self.appearance;
+        let density = self.density;
+        let show_chart = self.show_chart;
+        let compact_sidebar = self.compact_sidebar;
+        let show_perf = self.show_perf;
         let channel = self.channel;
         let telemetry = self.telemetry;
         let update_enabled = self.update_enabled;
@@ -145,6 +218,133 @@ impl Render for SettingsPage {
                     );
                 }
                 group
+            })
+            .child(heading("Density"))
+            .child({
+                let entity = cx.entity().downgrade();
+                let mut group = radio_group("density");
+                for &mode in &Density::ALL {
+                    let entity = entity.clone();
+                    group = group.child(
+                        choice_radio(
+                            format!("den-{}", mode.as_str()),
+                            density == mode,
+                            mode.label(),
+                            mode.hint(),
+                            cx,
+                        )
+                        .on_change(move |next, _, window, cx| {
+                            if next {
+                                let _ = entity.update(cx, |this, cx| {
+                                    this.set_density(mode, window, cx);
+                                });
+                            }
+                        }),
+                    );
+                }
+                group
+            })
+            .child(heading("Overview metrics"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("tiles on Overview — defaults to load, errors, replicas, disk"),
+            )
+            .child({
+                let entity = cx.entity().downgrade();
+                let mut cols = h_flex().gap_4().items_start();
+                for column in OverviewMetric::ALL.chunks(6) {
+                    let mut col = v_flex().gap_2().flex_1();
+                    for &metric in column {
+                        let on = self.metric_on(metric);
+                        let entity = entity.clone();
+                        col = col.child(
+                            Checkbox::new(format!("m-{}", metric.id()))
+                                .label(metric.label())
+                                .checked(on)
+                                .small()
+                                .on_click(move |next, _, cx| {
+                                    let on = *next;
+                                    let _ = entity.update(cx, |this, cx| {
+                                        this.set_metric(metric, on, cx);
+                                    });
+                                }),
+                        );
+                    }
+                    cols = cols.child(col);
+                }
+                cols
+            })
+            .child({
+                let entity = cx.entity().downgrade();
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_sm().child("Queries / sec chart"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("sparkline under the metric tiles"),
+                            ),
+                    )
+                    .child(theme_switch("show-chart", show_chart, cx).on_change(
+                        move |next, _, _, cx| {
+                            let _ = entity.update(cx, |this, cx| this.set_show_chart(next, cx));
+                        },
+                    ))
+            })
+            .child({
+                let entity = cx.entity().downgrade();
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_sm().child("Compact sidebar"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("start with the icon strip (⌘B still toggles)"),
+                            ),
+                    )
+                    .child(theme_switch("compact-sidebar", compact_sidebar, cx).on_change(
+                        move |next, _, _, cx| {
+                            let _ =
+                                entity.update(cx, |this, cx| this.set_compact_sidebar(next, cx));
+                        },
+                    ))
+            })
+            .child({
+                let entity = cx.entity().downgrade();
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_sm().child("Status bar timing"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("fetch latency and memory in the status bar"),
+                            ),
+                    )
+                    .child(theme_switch("show-perf", show_perf, cx).on_change(
+                        move |next, _, _, cx| {
+                            let _ = entity.update(cx, |this, cx| this.set_show_perf(next, cx));
+                        },
+                    ))
             })
             .child(heading("Updates"))
             .child({

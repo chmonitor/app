@@ -103,7 +103,7 @@ pub fn range_toggle(
     Toggle::new(id)
         .pressed(pressed)
         .px_2()
-        .h_7()
+        .h_6()
         .flex()
         .items_center()
         .justify_center()

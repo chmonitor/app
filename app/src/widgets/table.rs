@@ -5,6 +5,8 @@ use gpui::{App, ElementId, div, prelude::*, px};
 use gpui_base::{Table, TableBody, TableCell, TableHead, TableHeader, TableRow};
 use gpui_component::ActiveTheme as _;
 
+use crate::density::Density;
+
 use super::geometry::{format_bytes, format_count, format_duration_ms};
 
 /// One cell's value; the variant picks the formatter and the alignment.
@@ -57,12 +59,15 @@ pub fn data_table(
     let header_bg = cx.theme().secondary;
     let n_cols = columns.len();
     let n_rows = rows.len();
+    let d = Density::current();
+    let px_cell = d.table_px();
+    let py_cell = d.table_py();
 
     let header = TableHeader::new("header").child(TableRow::new("header-row", 1).flex().children(
         columns.iter().enumerate().map(|(i, col)| {
             let mut head = TableHead::new(("head", i), i + 1)
-                .px_3()
-                .py_2()
+                .px(px(px_cell))
+                .py(px(py_cell))
                 .text_xs()
                 .text_color(muted)
                 .child(col.name.clone());
@@ -86,8 +91,8 @@ pub fn data_table(
                     let mut cell = match cells.get(i) {
                         Some(value) => {
                             let mut c = TableCell::new(format!("cell-{row_ix}-{i}"), i + 1)
-                                .px_3()
-                                .py_1()
+                                .px(px(px_cell))
+                                .py(px(py_cell))
                                 .text_xs()
                                 .child(value.display());
                             if value.numeric() {

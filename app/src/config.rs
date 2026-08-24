@@ -50,15 +50,44 @@ pub struct TelemetrySection {
     pub enabled: bool,
 }
 
-/// `[ui]` table — appearance preference (`system` / `light` / `dark`)
-/// and the selected host id (`default` or a `[profiles.*]` key).
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+/// `[ui]` table — appearance, density, visible Overview metrics, host.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct UiSection {
     #[serde(default)]
     pub appearance: Option<String>,
     /// Active host: `"default"` for `[profile]`, or a `[profiles.<id>]` key.
     #[serde(default)]
     pub host: Option<String>,
+    /// `"compact"` (default) or `"comfortable"`.
+    #[serde(default)]
+    pub density: Option<String>,
+    /// Overview tile ids (`qps`, `running`, `slow`, `failed`, `replicas`,
+    /// `disk`, …). Empty means the default six.
+    #[serde(default)]
+    pub overview_metrics: Vec<String>,
+    /// Show the queries/sec sparkline on Overview. Default true.
+    #[serde(default = "default_true")]
+    pub show_chart: bool,
+    /// Start with the sidebar collapsed to an icon strip. Default false.
+    #[serde(default)]
+    pub compact_sidebar: bool,
+    /// Show fetch latency and RSS in the status bar. Default true.
+    #[serde(default = "default_true")]
+    pub show_perf: bool,
+}
+
+impl Default for UiSection {
+    fn default() -> Self {
+        Self {
+            appearance: None,
+            host: None,
+            density: None,
+            overview_metrics: Vec::new(),
+            show_chart: true,
+            compact_sidebar: false,
+            show_perf: true,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -347,6 +376,9 @@ Config (`config.toml`):
   [update]
   enabled = true          # check on launch (default)
   auto_download = false   # fetch the archive without a click
+  [ui]
+  density = \"compact\"       # or comfortable
+  overview_metrics = []     # empty = qps, running, slow, failed, replicas, disk
 ";
 
 impl Cli {
@@ -529,16 +561,48 @@ user = "alice"
         let path = write_cfg("");
         let mut cfg = ConfigFile::default();
         cfg.ui.appearance = Some("light".into());
+        cfg.ui.density = Some("comfortable".into());
+        cfg.ui.overview_metrics = vec!["qps".into(), "replicas".into()];
+        cfg.ui.show_chart = false;
         cfg.profile.channel = Some("beta".into());
         cfg.telemetry.enabled = true;
         cfg.update.auto_download = true;
         save_config_to(&path, &cfg).unwrap();
         let back = load_config_from(&path);
         assert_eq!(back.ui.appearance.as_deref(), Some("light"));
+        assert_eq!(back.ui.density.as_deref(), Some("comfortable"));
+        assert_eq!(back.ui.overview_metrics, vec!["qps", "replicas"]);
+        assert!(!back.ui.show_chart);
         assert_eq!(back.profile.channel.as_deref(), Some("beta"));
         assert!(back.telemetry.enabled);
         assert!(back.update.enabled);
         assert!(back.update.auto_download);
+    }
+
+    #[test]
+    fn ui_section_defaults_compact_and_chart_on() {
+        let cfg: ConfigFile = toml::from_str("").unwrap();
+        assert!(cfg.ui.show_chart);
+        assert!(cfg.ui.show_perf);
+        assert!(!cfg.ui.compact_sidebar);
+        assert!(cfg.ui.overview_metrics.is_empty());
+        assert!(cfg.ui.density.is_none());
+        let cfg: ConfigFile = toml::from_str(
+            r#"
+[ui]
+density = "comfortable"
+overview_metrics = ["qps", "disk"]
+show_chart = false
+compact_sidebar = true
+show_perf = false
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.ui.density.as_deref(), Some("comfortable"));
+        assert_eq!(cfg.ui.overview_metrics, vec!["qps", "disk"]);
+        assert!(!cfg.ui.show_chart);
+        assert!(cfg.ui.compact_sidebar);
+        assert!(!cfg.ui.show_perf);
     }
 
     #[test]

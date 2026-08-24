@@ -4,6 +4,8 @@
 use gpui::{App, Hsla, rgb};
 use gpui_component::{Theme, ThemeMode};
 
+use crate::density::Density;
+
 fn hx(v: u32) -> Hsla {
     rgb(v).into()
 }
@@ -11,11 +13,12 @@ fn hx(v: u32) -> Hsla {
 /// Paint dashboard colors onto the active gpui-component theme.
 pub fn apply_brand(cx: &mut App) {
     let dark = Theme::global(cx).is_dark();
+    let density = Density::current();
     let theme = Theme::global_mut(cx);
-    theme.font_size = gpui::px(14.);
-    theme.mono_font_size = gpui::px(12.);
-    theme.radius = gpui::px(10.);
-    theme.radius_lg = gpui::px(12.);
+    theme.font_size = gpui::px(density.font_size());
+    theme.mono_font_size = gpui::px(density.mono_font_size());
+    theme.radius = gpui::px(density.radius());
+    theme.radius_lg = gpui::px(density.radius_lg());
     theme.mono_font_family = "Menlo".into();
     if dark {
         paint_dark(theme);
@@ -63,6 +66,10 @@ fn paint_light(theme: &mut Theme) {
     theme.skeleton = hx(0xe5e5e5);
     theme.popover = hx(0xffffff);
     theme.popover_foreground = hx(0x252525);
+    theme.title_bar = hx(0xfafafa);
+    theme.title_bar_border = hx(0xe5e5e5);
+    theme.status_bar = hx(0xfafafa);
+    theme.status_bar_border = hx(0xe5e5e5);
 }
 
 fn paint_dark(theme: &mut Theme) {
@@ -103,6 +110,10 @@ fn paint_dark(theme: &mut Theme) {
     theme.skeleton = hx(0x3f3f46);
     theme.popover = hx(0x2a2a2a);
     theme.popover_foreground = hx(0xfafafa);
+    theme.title_bar = hx(0x1c1c1c);
+    theme.title_bar_border = hx(0x3f3f46);
+    theme.status_bar = hx(0x1c1c1c);
+    theme.status_bar_border = hx(0x3f3f46);
 }
 
 pub fn current_mode(cx: &App) -> ThemeMode {

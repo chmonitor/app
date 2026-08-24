@@ -4,10 +4,10 @@ use chm_app::config::{Cli, CliError, load_config};
 use chm_app::pages::settings::{appearance_from_cfg, apply_appearance};
 use chm_app::shell::{OpenSettings, Refresh, Shell, ToggleSidebar};
 use gpui::{
-    App, AppContext as _, Bounds, Focusable as _, KeyBinding, Menu, MenuItem, SharedString,
-    TitlebarOptions, WindowBounds, WindowOptions, actions, px, size,
+    App, AppContext as _, Bounds, Focusable as _, KeyBinding, Menu, MenuItem, WindowBounds,
+    WindowOptions, actions, px, size,
 };
-use gpui_component::Root;
+use gpui_component::{Root, TitleBar};
 
 actions!(chm_app, [Quit]);
 
@@ -64,15 +64,12 @@ fn main() {
             ]);
 
             let appearance = appearance_from_cfg(load_config().ui.appearance.as_deref());
-            let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
+            let bounds = Bounds::centered(None, size(px(1100.0), px(720.0)), cx);
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some(SharedString::from("chmonitor")),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
+                    window_min_size: Some(size(px(720.0), px(480.0))),
+                    ..TitleBar::window_options()
                 },
                 move |window, cx| {
                     apply_appearance(appearance, window, cx);
