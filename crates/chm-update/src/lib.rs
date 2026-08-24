@@ -419,9 +419,15 @@ mod tests {
             .await
             .unwrap()
             .expect("newer");
-        assert_eq!(release.url(), "https://dl.example/mac.zip");
-        assert_eq!(release.target(), Some(current_target()));
-        assert_eq!(release.sha256(), Some("abc"));
+        let target = current_target();
+        let (expected_url, expected_sha) = if target == "x86_64-unknown-linux-gnu" {
+            ("https://dl.example/linux.tar.gz", None)
+        } else {
+            ("https://dl.example/mac.zip", Some("abc"))
+        };
+        assert_eq!(release.url(), expected_url);
+        assert_eq!(release.target(), Some(target));
+        assert_eq!(release.sha256(), expected_sha);
     }
 
     #[tokio::test]
