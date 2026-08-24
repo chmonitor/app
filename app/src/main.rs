@@ -8,13 +8,14 @@
 //! * Fonts must be registered before the first window paints.
 
 use bezel::gpui::{
-    App, AppContext as _, Bounds, Focusable as _, Menu, MenuItem, SharedString, TitlebarOptions,
-    WindowBounds, WindowOptions, actions, px, size,
+    App, AppContext as _, Bounds, Focusable as _, KeyBinding, Menu, MenuItem, SharedString,
+    TitlebarOptions, WindowBounds, WindowOptions, actions, px, size,
 };
 use bezel::theme;
 use bezel::ui;
-use chm_app::config::{Cli, CliError};
-use chm_app::shell::Shell;
+use chm_app::config::{Cli, CliError, load_config};
+use chm_app::pages::settings::appearance_from_cfg;
+use chm_app::shell::{OpenSettings, Refresh, Shell, ToggleSidebar};
 
 actions!(chm_app, [Quit]);
 
@@ -46,13 +47,28 @@ fn main() {
         if let Err(err) = ui::register_fonts(cx) {
             eprintln!("FONT REGISTRATION FAILED: {err:?}");
         }
-        theme::appearance::init(theme::appearance::AppearanceMode::System, cx);
+        let appearance = appearance_from_cfg(load_config().ui.appearance.as_deref());
+        theme::appearance::init(appearance, cx);
         // TextField keybindings are opt-in and scoped to the field's key context.
         ui::input::init(cx);
+        // Bind before set_menus so the menu bar can show the keystrokes.
+        cx.bind_keys([
+            KeyBinding::new("cmd-,", OpenSettings, None),
+            KeyBinding::new("cmd-b", ToggleSidebar, None),
+            KeyBinding::new("cmd-r", Refresh, None),
+        ]);
         // Without a menu item cmd-q does nothing — no nib ships with a gpui app.
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
         cx.set_menus(vec![
-            Menu::new("chmonitor").items([MenuItem::action("Quit", Quit)]),
+            Menu::new("chmonitor").items([
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::separator(),
+                MenuItem::action("Quit", Quit),
+            ]),
+            Menu::new("View").items([
+                MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                MenuItem::action("Refresh", Refresh),
+            ]),
         ]);
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);

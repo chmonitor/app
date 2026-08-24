@@ -43,6 +43,13 @@ pub struct TelemetrySection {
     pub enabled: bool,
 }
 
+/// `[ui]` table — appearance preference (`system` / `light` / `dark`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct UiSection {
+    #[serde(default)]
+    pub appearance: Option<String>,
+}
+
 /// Whole `config.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ConfigFile {
@@ -53,6 +60,8 @@ pub struct ConfigFile {
     pub profiles: BTreeMap<String, ProfileConfig>,
     #[serde(default)]
     pub telemetry: TelemetrySection,
+    #[serde(default)]
+    pub ui: UiSection,
 }
 
 /// `<config_dir>/chmonitor/config.toml`, or `CHM_CONFIG` when set.
@@ -75,6 +84,35 @@ pub fn profile_name_from_env() -> Option<String> {
 /// "no profile" and the app shows the Connect screen.
 pub fn load_profile() -> Option<ProfileConfig> {
     load_profile_from(config_path()?.as_path(), profile_name_from_env().as_deref())
+}
+
+/// Read `config.toml`, or an empty default when the file is missing/invalid.
+pub fn load_config() -> ConfigFile {
+    config_path()
+        .as_deref()
+        .map(load_config_from)
+        .unwrap_or_default()
+}
+
+pub fn load_config_from(path: &Path) -> ConfigFile {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| toml::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Write `config.toml`, creating the parent directory when needed.
+pub fn save_config(cfg: &ConfigFile) -> Result<(), String> {
+    let path = config_path().ok_or_else(|| "no config directory on this platform".to_string())?;
+    save_config_to(&path, cfg)
+}
+
+pub fn save_config_to(path: &Path, cfg: &ConfigFile) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
+    }
+    let out = toml::to_string_pretty(cfg).map_err(|e| format!("serialize failed: {e}"))?;
+    std::fs::write(path, out).map_err(|e| format!("write failed: {e}"))
 }
 
 /// Load `[profile]` or `[profiles.<named>]` from an explicit path.
@@ -296,8 +334,23 @@ user = "alice"
             },
         );
         cfg.telemetry.enabled = true;
+        cfg.ui.appearance = Some("dark".into());
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: ConfigFile = toml::from_str(&text).unwrap();
         assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn save_config_to_roundtrips_ui_and_channel() {
+        let path = write_cfg("");
+        let mut cfg = ConfigFile::default();
+        cfg.ui.appearance = Some("light".into());
+        cfg.profile.channel = Some("beta".into());
+        cfg.telemetry.enabled = true;
+        save_config_to(&path, &cfg).unwrap();
+        let back = load_config_from(&path);
+        assert_eq!(back.ui.appearance.as_deref(), Some("light"));
+        assert_eq!(back.profile.channel.as_deref(), Some("beta"));
+        assert!(back.telemetry.enabled);
     }
 }

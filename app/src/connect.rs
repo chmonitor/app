@@ -15,7 +15,7 @@ use bezel::theme::Theme;
 use bezel::ui::input::TextField;
 use bezel::ui::widgets::{ButtonStyle, Buttons};
 
-use crate::config::{ProfileConfig, config_path, source_from_profile};
+use crate::config::{ProfileConfig, load_config, save_config, source_from_profile};
 
 /// Fired after Save successfully writes config.toml.
 #[derive(Debug, Clone)]
@@ -151,41 +151,17 @@ impl ConnectFlow {
             cx.notify();
             return;
         };
-        // Preserve anything outside [profile] (e.g. [telemetry]) if a config
-        // already exists; otherwise start from defaults.
-        let mut cfg = config_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|text| toml::from_str::<crate::config::ConfigFile>(&text).ok())
-            .unwrap_or_default();
+        // Preserve anything outside [profile] (e.g. [telemetry], [ui]).
+        let mut cfg = load_config();
         cfg.profile = profile.clone();
-        let out = match toml::to_string_pretty(&cfg) {
-            Ok(out) => out,
-            Err(e) => {
-                self.test = TestState::Failed(format!("serialize failed: {e}"));
-                cx.notify();
-                return;
-            }
-        };
-        let Some(path) = config_path() else {
-            self.test = TestState::Failed("no config directory on this platform".into());
-            cx.notify();
-            return;
-        };
-        if let Some(parent) = path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            self.test = TestState::Failed(format!("mkdir failed: {e}"));
-            cx.notify();
-            return;
-        }
-        match std::fs::write(&path, out) {
+        match save_config(&cfg) {
             Ok(()) => {
                 self.test = TestState::Ok;
                 cx.emit(ConnectEvent::SavedProfile(profile));
                 cx.notify();
             }
             Err(e) => {
-                self.test = TestState::Failed(format!("write failed: {e}"));
+                self.test = TestState::Failed(e);
                 cx.notify();
             }
         }

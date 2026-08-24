@@ -28,10 +28,11 @@ use crate::pages::merges::MergesPage;
 use crate::pages::overview::OverviewPage;
 use crate::pages::queries::QueriesPage;
 use crate::pages::replicas::ReplicasPage;
+use crate::pages::settings::SettingsPage;
 use crate::pages::tables::TablesPage;
 use crate::pages::traffic::TrafficPage;
 
-actions!(chm_shell, [Refresh, ToggleSidebar]);
+actions!(chm_shell, [Refresh, ToggleSidebar, OpenSettings]);
 
 /// Seconds between automatic background refreshes.
 const POLL_SECS: u64 = 30;
@@ -91,6 +92,7 @@ pub struct Shell {
     tables: Entity<TablesPage>,
     traffic: Entity<TrafficPage>,
     connect: Entity<ConnectFlow>,
+    settings: Entity<SettingsPage>,
     update_note: Option<UpdateNote>,
     /// `None` follows the viewport; `Some` is a click/`cmd-b` override.
     sidebar_collapsed: Option<bool>,
@@ -190,6 +192,7 @@ impl Shell {
             tables: cx.new(|_| TablesPage::new()),
             traffic: cx.new(|_| TrafficPage::new()),
             connect: cx.new(|cx| ConnectFlow::new(load_profile(), cx)),
+            settings: cx.new(|_| SettingsPage::new()),
             update_note: None,
             sidebar_collapsed: None,
         };
@@ -199,6 +202,7 @@ impl Shell {
         cx.bind_keys([
             KeyBinding::new("r", Refresh, None),
             KeyBinding::new("cmd-b", ToggleSidebar, None),
+            KeyBinding::new("cmd-,", OpenSettings, None),
         ]);
 
         // Rebuild the source after the Connect screen writes a new profile.
@@ -258,7 +262,7 @@ impl Shell {
 
     /// Snapshot what a background fetch needs. Cheap: one Arc clone + a copy.
     fn poll_job(&self) -> Option<PollJob> {
-        if self.page == Page::Connect {
+        if matches!(self.page, Page::Connect | Page::Settings) {
             return None;
         }
         self.source.as_ref().map(|src| PollJob {
@@ -442,6 +446,50 @@ impl Shell {
             .children(items)
     }
 
+    fn settings_nav(
+        &self,
+        theme: &Theme,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let active = self.page == Page::Settings;
+        let label = if compact {
+            div().child(Page::Settings.icon())
+        } else {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(Page::Settings.icon())
+                .child(div().child(Page::Settings.title()))
+                .child(
+                    div()
+                        .ml(px(2.0))
+                        .text_size(px(10.0))
+                        .text_color(theme.text_faint)
+                        .child("⌘,"),
+                )
+        };
+        div()
+            .id("nav-Settings")
+            .w_full()
+            .px(px(if compact { 0.0 } else { 12.0 }))
+            .py(px(6.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .when(active, |el| el.bg(theme.element_active))
+            .hover(|s| s.bg(theme.element_hover))
+            .text_size(px(13.0))
+            .text_color(if active { theme.text } else { theme.text_muted })
+            .when(compact, |el| el.flex().justify_center())
+            .on_click(cx.listener(|this, _: &bezel::gpui::ClickEvent, _, cx| {
+                this.page = Page::Settings;
+                cx.notify();
+            }))
+            .child(label)
+    }
+
     fn range_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> bezel::gpui::Div {
         let mut row = div().flex().flex_row().items_center().gap(px(4.0));
         for range in TimeRange::ALL {
@@ -514,7 +562,7 @@ impl Shell {
 
     fn content(&mut self, _cx: &mut Context<Self>) -> bezel::gpui::AnyElement {
         // No source yet: Connect owns the pane whatever the route points at.
-        if self.source.is_none() && self.page != Page::Connect {
+        if self.source.is_none() && !matches!(self.page, Page::Connect | Page::Settings) {
             return div()
                 .flex()
                 .flex_1()
@@ -534,6 +582,7 @@ impl Shell {
             Page::Tables => self.tables.clone().into_any_element(),
             Page::Traffic => self.traffic.clone().into_any_element(),
             Page::Connect => self.connect.clone().into_any_element(),
+            Page::Settings => self.settings.clone().into_any_element(),
         }
     }
 }
@@ -560,6 +609,10 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &Refresh, _, cx| this.refresh_now(cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
                 this.toggle_sidebar(window.viewport_size().width < px(COMPACT_BELOW), cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
+                this.page = Page::Settings;
+                cx.notify();
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 // Only when the shell itself holds focus — digits typed into
@@ -606,7 +659,18 @@ impl Render for Shell {
                     .border_color(theme.border)
                     .bg(theme.surface)
                     .child(self.sidebar_toggle(&theme, compact, cx))
-                    .child(self.sidebar(&theme, compact, cx)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h_0()
+                            .when(compact, |col| col.items_center())
+                            .child(self.sidebar(&theme, compact, cx))
+                            .child(div().flex_1())
+                            .child(self.settings_nav(&theme, compact, cx))
+                            .pb(px(28.0)),
+                    ),
             )
             .child(
                 div()
@@ -686,7 +750,7 @@ async fn apply_poll(job: PollJob, this: &WeakEntity<Shell>, cx: &mut AsyncApp) {
     let src = job.src;
     let range = job.range;
     let outcome = match job.page {
-        Page::Connect => return,
+        Page::Connect | Page::Settings => return,
         Page::Overview => {
             let (overview, traffic) = chm_core::tokio_block_on(async {
                 tokio::join!(src.overview(range), src.traffic(range))

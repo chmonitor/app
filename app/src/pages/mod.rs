@@ -8,6 +8,7 @@ pub mod merges;
 pub mod overview;
 pub mod queries;
 pub mod replicas;
+pub mod settings;
 pub mod tables;
 pub mod traffic;
 
@@ -22,6 +23,7 @@ pub enum Page {
     Tables,
     Traffic,
     Connect,
+    Settings,
 }
 
 impl Page {
@@ -51,6 +53,7 @@ impl Page {
             Page::Tables => "Tables",
             Page::Traffic => "Traffic",
             Page::Connect => "Connect",
+            Page::Settings => "Settings",
         }
     }
 
@@ -72,6 +75,7 @@ impl Page {
             Page::Tables => "▤",
             Page::Traffic => "↕",
             Page::Connect => "⌁",
+            Page::Settings => "⚙",
         };
         div()
             .w(px(16.0))
@@ -118,5 +122,7 @@ mod tests {
         assert!(Page::Traffic.uses_range());
         assert!(!Page::Merges.uses_range());
         assert!(!Page::Connect.uses_range());
+        assert_eq!(Page::Settings.title(), "Settings");
+        assert!(!Page::ALL.contains(&Page::Settings));
     }
 }
