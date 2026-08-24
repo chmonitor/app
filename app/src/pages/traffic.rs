@@ -39,15 +39,21 @@ impl TrafficPage {
 }
 
 fn chart(title: &str, unit: &str, points: &[chm_core::SeriesPoint]) -> bezel::gpui::Div {
-    div().flex_1().min_w_0().h(px(200.0)).child(line_chart(
-        title,
-        unit,
-        vec![NamedSeries {
-            name: title.into(),
-            points: points.to_vec(),
-            accent: true,
-        }],
-    ))
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .h(px(200.0))
+        .child(line_chart(
+            title,
+            unit,
+            vec![NamedSeries {
+                name: title.into(),
+                points: points.to_vec(),
+                accent: true,
+            }],
+        ))
 }
 
 impl Render for TrafficPage {

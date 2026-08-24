@@ -133,15 +133,22 @@ impl Render for OverviewPage {
         if let Some(t) = &self.traffic
             && !t.queries_per_sec.is_empty()
         {
-            grid = grid.child(div().w_full().h(px(220.0)).child(line_chart(
-                "queries / sec",
-                "qps",
-                vec![NamedSeries {
-                    name: "qps".into(),
-                    points: t.queries_per_sec.clone(),
-                    accent: true,
-                }],
-            )));
+            grid = grid.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .h(px(220.0))
+                    .child(line_chart(
+                        "queries / sec",
+                        "qps",
+                        vec![NamedSeries {
+                            name: "qps".into(),
+                            points: t.queries_per_sec.clone(),
+                            accent: true,
+                        }],
+                    )),
+            );
         }
         grid
     }

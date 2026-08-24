@@ -5,7 +5,7 @@
 use super::geometry::{Bounds, format_count, nice_scale, points_to_px};
 use bezel::gpui::{
     App, Bounds as GBounds, Font, FontFeatures, FontWeight, Hsla, IntoElement, PathBuilder, Pixels,
-    TextAlign, TextRun, Window, canvas, div, font, point, prelude::*, px,
+    TextAlign, TextRun, Window, canvas, div, font, point, prelude::*, px, size,
 };
 use bezel::theme::{Theme, current_appearance, hairline};
 use chm_core::SeriesPoint;
@@ -24,14 +24,15 @@ struct ChartLayout {
     plot: Bounds,
 }
 
-const PAD_LEFT: f64 = 64.0;
+const PAD_LEFT: f64 = 52.0;
 const PAD_RIGHT: f64 = 12.0;
-const PAD_TOP: f64 = 22.0;
+const PAD_TOP: f64 = 8.0;
 const PAD_BOTTOM: f64 = 22.0;
 const MIN_PLOT_W: f64 = 40.0;
 const MIN_PLOT_H: f64 = 40.0;
 const STROKE_WIDTH: f32 = 1.5;
-const AXIS_FONT_SIZE: f32 = 10.0;
+const AXIS_FONT_SIZE: f32 = 11.0;
+const AXIS_LINE_HEIGHT: f32 = 14.0;
 
 fn mono_font(t: &Theme) -> Font {
     let mut f = font(t.font_mono.clone());
@@ -43,6 +44,16 @@ fn mono_font(t: &Theme) -> Font {
 /// decimal (`2.5G` vs `1.0 GiB` both read fine on an axis).
 fn tick_label(v: f64) -> String {
     format_count(v)
+}
+
+/// Top / middle / bottom labels. `ticks` from [`nice_scale`] is ascending.
+fn pick_y_labels(ticks: &[f64]) -> Vec<f64> {
+    match ticks.len() {
+        0 => Vec::new(),
+        1 => vec![ticks[0]],
+        2 => vec![ticks[1], ticks[0]],
+        n => vec![ticks[n - 1], ticks[n / 2], ticks[0]],
+    }
 }
 
 /// The full chart element: title, plot area with grid lines, tick labels on
@@ -71,22 +82,24 @@ pub fn line_chart(title: &str, unit: &str, series: Vec<NamedSeries>) -> impl Int
         .gap(px(8.0))
         .child(title_el)
         .child(unit_el);
-    let grid_color = hairline(0.14);
     let axis_text_color = t.text_muted;
     let line_color_muted = t.text_muted;
     let line_color_accent = t.accent;
+    let axis_color = hairline(0.18);
     let mono = mono_font(&t);
     let font_size = px(AXIS_FONT_SIZE);
 
+    // Fill the caller's height. A non-flex parent with only `h()` used to
+    // collapse the canvas, which stacked every y-label on ~40px of plot.
     div()
-        .flex_1()
-        .min_w_0()
-        .min_h_0()
         .flex()
         .flex_col()
         .gap(px(6.0))
+        .w_full()
+        .h_full()
+        .min_h(px(120.0))
         .child(header)
-        .child(div().flex_1().min_h_0().w_full().child(canvas(
+        .child(div().flex_1().min_h(px(80.0)).w_full().child(canvas(
             move |bounds: GBounds<Pixels>, _window: &mut Window, _cx: &mut App| {
                 let w =
                     f64::from(bounds.size.width.as_f32()).max(PAD_LEFT + PAD_RIGHT + MIN_PLOT_W);
@@ -130,34 +143,39 @@ pub fn line_chart(title: &str, unit: &str, series: Vec<NamedSeries>) -> impl Int
                     }
                 };
 
-                let (y_min, y_max, y_ticks) = nice_scale(data_min, data_max, 4);
+                let (y_min, y_max, y_ticks) = nice_scale(data_min, data_max, 3);
                 let y_span = if y_max > y_min { y_max - y_min } else { 1.0 };
-                // A 1px fill-quad per tick reads as a ruled-notebook texture on
-                // Metal (especially with runtime shaders); stroke a handful of
-                // grid lines instead, and cap labels so they cannot overlap.
-                let tick_step = y_ticks.len().div_ceil(5).max(1);
 
-                for (i, tick) in y_ticks.iter().enumerate() {
-                    if i % tick_step != 0 && i + 1 != y_ticks.len() {
-                        continue;
-                    }
+                // Horizontal 1px strokes/quads tessellate into a ruled-notebook
+                // fill on this gpui Metal path. Skip them. A vertical axis is
+                // safe because Y varies. Three y-labels, right-aligned in the
+                // left gutter via WrappedLine's bounds (not a guessed wrap).
+                let mut axis = PathBuilder::stroke(px(1.0));
+                axis.move_to(point(
+                    origin.x + px(plot.x as f32),
+                    origin.y + px(plot.y as f32),
+                ));
+                axis.line_to(point(
+                    origin.x + px(plot.x as f32),
+                    origin.y + px((plot.y + plot.h) as f32),
+                ));
+                if let Ok(path) = axis.build() {
+                    window.paint_path(path, axis_color);
+                }
+
+                let y_labels = pick_y_labels(&y_ticks);
+                for tick in y_labels {
                     let frac = (tick - y_min) / y_span;
-                    let y = plot.y + plot.h - frac * plot.h;
-                    if y < plot.y - 0.5 || y > plot.y + plot.h + 0.5 {
-                        continue;
-                    }
-                    let y = y.clamp(plot.y, plot.y + plot.h);
-                    let mut grid = PathBuilder::stroke(px(1.0));
-                    grid.move_to(point(origin.x + px(plot.x as f32), origin.y + px(y as f32)));
-                    grid.line_to(point(
-                        origin.x + px((plot.x + plot.w) as f32),
-                        origin.y + px(y as f32),
-                    ));
-                    if let Ok(path) = grid.build() {
-                        window.paint_path(path, grid_color);
-                    }
-                    let label = tick_label(*tick);
+                    let y = (plot.y + plot.h - frac * plot.h).clamp(plot.y, plot.y + plot.h);
+                    let label = tick_label(tick);
                     let label_len = label.len();
+                    let gutter = GBounds::<Pixels> {
+                        origin: origin + point(px(2.0), px(y as f32) - px(AXIS_LINE_HEIGHT * 0.5)),
+                        size: size(
+                            px((plot.x - 8.0) as f32).max(px(24.0)),
+                            px(AXIS_LINE_HEIGHT),
+                        ),
+                    };
                     let shaped = window
                         .text_system()
                         .shape_text(
@@ -171,21 +189,18 @@ pub fn line_chart(title: &str, unit: &str, series: Vec<NamedSeries>) -> impl Int
                                 underline: None,
                                 strikethrough: None,
                             }],
-                            None,
-                            None,
+                            Some(gutter.size.width),
+                            Some(1),
                         )
                         .ok();
                     if let Some(mut lines) = shaped
                         && let Some(line) = lines.first_mut()
                     {
-                        let line_w = line.unwrapped_layout.width;
-                        let lx = origin.x + px(plot.x as f32) - line_w - px(8.0);
-                        let ly = origin.y + px(y as f32) - px(AXIS_FONT_SIZE * 0.55);
                         let _ = line.paint(
-                            point(lx, ly),
-                            px(AXIS_FONT_SIZE * 1.4),
-                            TextAlign::Left,
-                            None,
+                            gutter.origin,
+                            px(AXIS_LINE_HEIGHT),
+                            TextAlign::Right,
+                            Some(gutter),
                             window,
                             _cx,
                         );
@@ -223,13 +238,20 @@ pub fn line_chart(title: &str, unit: &str, series: Vec<NamedSeries>) -> impl Int
                     if let Some(mut lines) = shaped
                         && let Some(line) = lines.first_mut()
                     {
-                        let lx = origin.x + px(x as f32) - line.unwrapped_layout.width / 2.0;
-                        let ly = origin.y + px((plot.y + plot.h) as f32) + px(5.0);
+                        let label_w = px(48.0);
+                        let box_bounds = GBounds::<Pixels> {
+                            origin: origin
+                                + point(
+                                    px(x as f32) - label_w / 2.0,
+                                    px((plot.y + plot.h) as f32) + px(4.0),
+                                ),
+                            size: size(label_w, px(AXIS_LINE_HEIGHT)),
+                        };
                         let _ = line.paint(
-                            point(lx, ly),
-                            px(AXIS_FONT_SIZE * 1.25),
-                            TextAlign::Left,
-                            None,
+                            box_bounds.origin,
+                            px(AXIS_LINE_HEIGHT),
+                            TextAlign::Center,
+                            Some(box_bounds),
                             window,
                             _cx,
                         );
@@ -284,4 +306,20 @@ pub fn chart_axis_for(series: &[NamedSeries]) -> (f64, f64, Vec<f64>) {
         return nice_scale(0.0, 1.0, 4);
     }
     nice_scale(lo, hi, 4)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pick_y_labels_takes_top_mid_bottom() {
+        assert_eq!(pick_y_labels(&[]), Vec::<f64>::new());
+        assert_eq!(pick_y_labels(&[3.0]), vec![3.0]);
+        assert_eq!(pick_y_labels(&[0.0, 10.0]), vec![10.0, 0.0]);
+        assert_eq!(
+            pick_y_labels(&[0.0, 5.0, 10.0, 15.0]),
+            vec![15.0, 10.0, 0.0]
+        );
+    }
 }
