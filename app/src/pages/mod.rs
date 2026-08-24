@@ -96,10 +96,11 @@ pub(crate) fn status(text: impl Into<SharedString>, cx: &App) -> gpui::Div {
         .child(text.into())
 }
 
-pub(crate) fn heading(title: &str) -> gpui::Div {
+pub(crate) fn heading(title: &str, cx: &App) -> gpui::Div {
     div()
-        .text_sm()
+        .text_xs()
         .font_weight(FontWeight::SEMIBOLD)
+        .text_color(cx.theme().muted_foreground)
         .child(SharedString::from(title.to_string()))
 }
 

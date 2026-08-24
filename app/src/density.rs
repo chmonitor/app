@@ -65,7 +65,7 @@ impl Density {
     pub fn radius(self) -> f32 {
         match self {
             Self::Compact => 6.0,
-            Self::Comfortable => 10.0,
+            Self::Comfortable => 8.0,
         }
     }
 

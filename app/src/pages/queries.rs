@@ -133,7 +133,7 @@ fn section(
         .flex()
         .flex_col()
         .gap(px(6.))
-        .child(heading(title))
+        .child(heading(title, cx))
         .child(body)
         .into_any_element()
 }

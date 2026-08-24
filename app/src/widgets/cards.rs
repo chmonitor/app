@@ -64,7 +64,8 @@ pub fn kpi_card(
                 .child(
                     div()
                         .text_size(px(d.card_value()))
-                        .font_weight(FontWeight::BOLD)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .font_family(cx.theme().mono_font_family.clone())
                         .text_color(cx.theme().foreground)
                         .child(value),
                 )

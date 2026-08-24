@@ -976,7 +976,7 @@ impl Shell {
 
     fn range_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity().downgrade();
-        let mut group = crate::widgets::controls::range_group("time-range");
+        let mut group = crate::widgets::controls::range_group("time-range", cx);
         for range in TimeRange::ALL {
             let entity = entity.clone();
             let pressed = self.range == range;
@@ -1145,8 +1145,7 @@ impl Render for Shell {
                                 .copied()
                                 .map(f32::from)
                                 .unwrap_or(SIDEBAR_W);
-                            let _ =
-                                entity.update(cx, |this, cx| this.set_sidebar_width(width, cx));
+                            let _ = entity.update(cx, |this, cx| this.set_sidebar_width(width, cx));
                         })
                         .child(
                             resizable_panel()

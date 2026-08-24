@@ -194,7 +194,7 @@ impl Render for SettingsPage {
         v_flex()
             .gap_5()
             .max_w(px(520.))
-            .child(heading("Appearance"))
+            .child(heading("Appearance", cx))
             .child({
                 let entity = cx.entity().downgrade();
                 let mut group = radio_group("appearance");
@@ -219,7 +219,7 @@ impl Render for SettingsPage {
                 }
                 group
             })
-            .child(heading("Density"))
+            .child(heading("Density", cx))
             .child({
                 let entity = cx.entity().downgrade();
                 let mut group = radio_group("density");
@@ -244,7 +244,7 @@ impl Render for SettingsPage {
                 }
                 group
             })
-            .child(heading("Overview metrics"))
+            .child(heading("Overview metrics", cx))
             .child(
                 div()
                     .text_xs()
@@ -293,9 +293,10 @@ impl Render for SettingsPage {
                                     .child("sparkline under the metric tiles"),
                             ),
                     )
-                    .child(theme_switch("show-chart", show_chart, cx).on_change(
-                        move |next, _, _, cx| {
-                            let _ = entity.update(cx, |this, cx| this.set_show_chart(next, cx));
+                    .child(theme_switch("show-chart", show_chart, cx).on_click(
+                        move |next, _, cx| {
+                            let on = *next;
+                            let _ = entity.update(cx, |this, cx| this.set_show_chart(on, cx));
                         },
                     ))
             })
@@ -316,10 +317,11 @@ impl Render for SettingsPage {
                                     .child("start with the icon strip (⌘B still toggles)"),
                             ),
                     )
-                    .child(theme_switch("compact-sidebar", compact_sidebar, cx).on_change(
-                        move |next, _, _, cx| {
+                    .child(theme_switch("compact-sidebar", compact_sidebar, cx).on_click(
+                        move |next, _, cx| {
+                            let on = *next;
                             let _ =
-                                entity.update(cx, |this, cx| this.set_compact_sidebar(next, cx));
+                                entity.update(cx, |this, cx| this.set_compact_sidebar(on, cx));
                         },
                     ))
             })
@@ -340,13 +342,14 @@ impl Render for SettingsPage {
                                     .child("fetch latency and memory in the status bar"),
                             ),
                     )
-                    .child(theme_switch("show-perf", show_perf, cx).on_change(
-                        move |next, _, _, cx| {
-                            let _ = entity.update(cx, |this, cx| this.set_show_perf(next, cx));
+                    .child(theme_switch("show-perf", show_perf, cx).on_click(
+                        move |next, _, cx| {
+                            let on = *next;
+                            let _ = entity.update(cx, |this, cx| this.set_show_perf(on, cx));
                         },
                     ))
             })
-            .child(heading("Updates"))
+            .child(heading("Updates", cx))
             .child({
                 let entity = cx.entity().downgrade();
                 h_flex()
@@ -364,9 +367,10 @@ impl Render for SettingsPage {
                                     .child("fetch the channel manifest from updates.chmonitor.dev"),
                             ),
                     )
-                    .child(theme_switch("upd-enabled", update_enabled, cx).on_change(
-                        move |next, _, _, cx| {
-                            let _ = entity.update(cx, |this, cx| this.set_update_enabled(next, cx));
+                    .child(theme_switch("upd-enabled", update_enabled, cx).on_click(
+                        move |next, _, cx| {
+                            let on = *next;
+                            let _ = entity.update(cx, |this, cx| this.set_update_enabled(on, cx));
                         },
                     ))
             })
@@ -387,9 +391,10 @@ impl Render for SettingsPage {
                                     .child("save the archive when a newer build is found"),
                             ),
                     )
-                    .child(theme_switch("upd-auto", auto_download, cx).on_change(
-                        move |next, _, _, cx| {
-                            let _ = entity.update(cx, |this, cx| this.set_auto_download(next, cx));
+                    .child(theme_switch("upd-auto", auto_download, cx).on_click(
+                        move |next, _, cx| {
+                            let on = *next;
+                            let _ = entity.update(cx, |this, cx| this.set_auto_download(on, cx));
                         },
                     ))
             })
@@ -432,7 +437,7 @@ impl Render for SettingsPage {
                         }),
                     )
             })
-            .child(heading("Telemetry"))
+            .child(heading("Telemetry", cx))
             .child({
                 let entity = cx.entity().downgrade();
                 h_flex()
@@ -452,13 +457,14 @@ impl Render for SettingsPage {
                                     ),
                             ),
                     )
-                    .child(theme_switch("telemetry", telemetry, cx).on_change(
-                        move |next, _, _, cx| {
-                            let _ = entity.update(cx, |this, cx| this.set_telemetry(next, cx));
+                    .child(theme_switch("telemetry", telemetry, cx).on_click(
+                        move |next, _, cx| {
+                            let on = *next;
+                            let _ = entity.update(cx, |this, cx| this.set_telemetry(on, cx));
                         },
                     ))
             })
-            .child(heading("Shortcuts"))
+            .child(heading("Shortcuts", cx))
             .child(
                 v_flex()
                     .gap_1()
@@ -470,7 +476,7 @@ impl Render for SettingsPage {
                     .child("⌘,    settings")
                     .child("⌘Q    quit"),
             )
-            .child(heading("Config file"))
+            .child(heading("Config file", cx))
             .child(
                 v_flex()
                     .gap_1()

@@ -3,9 +3,9 @@
 //! Base owns focus, keyboard, and accessibility. Theme tokens and layout
 //! stay here so the product is not locked to gpui-component's default look.
 
-use gpui::{App, ElementId, SharedString, div, prelude::*, px, relative};
-use gpui_base::{Button, Radio, RadioGroup, Switch, SwitchThumb, SwitchTrack, Toggle, ToggleGroup};
-use gpui_component::ActiveTheme as _;
+use gpui::{App, ElementId, FontWeight, SharedString, div, prelude::*, px, relative};
+use gpui_base::{Button, Radio, RadioGroup, Toggle, ToggleGroup};
+use gpui_component::{ActiveTheme as _, Sizable as _, switch::Switch};
 
 pub fn primary_button(
     id: impl Into<ElementId>,
@@ -103,45 +103,39 @@ pub fn range_toggle(
     Toggle::new(id)
         .pressed(pressed)
         .px_2()
-        .h_6()
+        .h(px(22.))
         .flex()
         .items_center()
         .justify_center()
         .text_xs()
+        .font_weight(if pressed {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::NORMAL
+        })
         .line_height(relative(1.))
-        .rounded(cx.theme().radius)
+        .rounded(px(5.))
         .when(pressed, |t| {
-            t.bg(cx.theme().primary)
-                .text_color(cx.theme().primary_foreground)
+            t.bg(cx.theme().background)
+                .text_color(cx.theme().foreground)
         })
         .when(!pressed, |t| t.text_color(cx.theme().muted_foreground))
-        .hover(|s| s.bg(cx.theme().accent))
+        .hover(|s| s.bg(cx.theme().background.opacity(0.7)))
         .child(label.into())
 }
 
-pub fn range_group(id: impl Into<ElementId>) -> ToggleGroup {
-    ToggleGroup::new(id).flex().items_center().gap_1()
+/// macOS segmented control track.
+pub fn range_group(id: impl Into<ElementId>, cx: &App) -> ToggleGroup {
+    ToggleGroup::new(id)
+        .flex()
+        .items_center()
+        .gap(px(1.))
+        .p(px(2.))
+        .rounded(px(7.))
+        .bg(cx.theme().muted)
 }
 
-/// Compact on/off switch styled from theme tokens.
-pub fn theme_switch(id: impl Into<ElementId>, checked: bool, cx: &App) -> Switch {
-    let on = cx.theme().primary;
-    let off = cx.theme().border;
-    let thumb = cx.theme().background;
-    Switch::new(id).checked(checked).child(
-        SwitchTrack::new("switch-track")
-            .checked(checked)
-            .w(px(36.))
-            .h(px(20.))
-            .p(px(2.))
-            .rounded_full()
-            .bg(if checked { on } else { off })
-            .child(
-                SwitchThumb::new(checked)
-                    .size_4()
-                    .rounded_full()
-                    .bg(thumb)
-                    .ml(if checked { px(16.) } else { px(0.) }),
-            ),
-    )
+/// Native gpui-component switch (system-blue when on).
+pub fn theme_switch(id: impl Into<ElementId>, checked: bool, _cx: &App) -> Switch {
+    Switch::new(id).checked(checked).small()
 }
