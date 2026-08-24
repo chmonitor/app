@@ -9,8 +9,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use chm_core::{
-    DataSource, Health, MergeRow, MockDataSource, Overview, QueryRow, ReplicaRow, TableStat,
-    TimeRange, TrafficSeries,
+    DataSource, Health, MergeRow, MockDataSource, Overview, QueryRow, ReplicaRow, SourceEngine,
+    TableStat, TimeRange, TrafficSeries,
 };
 
 use bezel::gpui::{
@@ -291,11 +291,20 @@ impl Shell {
         cfg.ui.host = Some(host_id.clone());
         let _ = save_config(&cfg);
         self.apply_host(host_id, profile);
-        if matches!(self.page, Page::Connect | Page::Settings) {
+        if matches!(self.page, Page::Connect | Page::Settings)
+            || !self.page.available(self.source_engine())
+        {
             self.page = Page::Overview;
         }
         self.refresh_now(cx);
         cx.notify();
+    }
+
+    fn source_engine(&self) -> SourceEngine {
+        self.source
+            .as_ref()
+            .map(|s| s.engine())
+            .unwrap_or(SourceEngine::ClickHouse)
     }
 
     fn hosts(&self) -> Vec<Host> {
@@ -570,7 +579,13 @@ impl Shell {
             for host in self.hosts() {
                 let id = host.id.clone();
                 let selected = active.as_deref() == Some(id.as_str());
-                let row_label = host.label.clone();
+                let tag = match host.profile.mode.as_deref() {
+                    Some("postgres") => " pg",
+                    Some("clickhouse") => " ch",
+                    Some("cloud") => " cloud",
+                    _ => "",
+                };
+                let row_label = format!("{}{tag}", host.label);
                 col = col.child(
                     div()
                         .id(SharedString::from(format!("host-{id}")))
@@ -623,11 +638,15 @@ impl Shell {
     }
 
     fn sidebar(&self, theme: &Theme, compact: bool, cx: &mut Context<Self>) -> bezel::gpui::Div {
+        let engine = self.source_engine();
         let items: Vec<bezel::gpui::AnyElement> = Page::ALL
             .iter()
-            .map(|&page| {
+            .copied()
+            .filter(|page| page.available(engine))
+            .enumerate()
+            .map(|(i, page)| {
                 let active = page == self.page;
-                let hotkey = format!("{}", page.index() + 1);
+                let hotkey = format!("{}", i + 1);
                 let label = if compact {
                     div().child(page.icon())
                 } else {
@@ -863,9 +882,16 @@ impl Render for Shell {
                     .parse::<usize>()
                     .ok()
                     .and_then(|n| n.checked_sub(1))
-                    && let Some(&page) = Page::ALL.get(idx)
                 {
-                    this.goto(page, cx);
+                    let engine = this.source_engine();
+                    let page = Page::ALL
+                        .iter()
+                        .copied()
+                        .filter(|p| p.available(engine))
+                        .nth(idx);
+                    if let Some(page) = page {
+                        this.goto(page, cx);
+                    }
                 }
             }))
             .flex()

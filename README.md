@@ -7,6 +7,8 @@ monitoring for macOS and Linux, with two connection modes:
    self-hosted chmonitor worker (`chm-cloud-api`).
 2. **Direct ClickHouse** — speaks to your ClickHouse instance over HTTP
    (`chm-clickhouse`), SQL ported from the web dashboard.
+3. **Postgres** — read-only `pg_stat_*` monitoring (`chm-postgres`), same
+   host switcher as ClickHouse. Merges/Traffic pages hide on a PG host.
 
 ## Build
 
@@ -56,6 +58,7 @@ keys `1`–`8` switch sidebar destinations; `cmd-b` toggles the sidebar;
 | `crates/chm-core` | domain types + `DataSource` trait + mock data |
 | `crates/chm-cloud-api` | mode 1: dashboard REST client |
 | `crates/chm-clickhouse` | mode 2: direct ClickHouse HTTP client |
+| `crates/chm-postgres` | mode 3: direct Postgres (`pg_stat_*`) |
 | `crates/chm-update` | channel-aware update checker (stable/beta) |
 | `crates/chm-telemetry` | opt-in telemetry + perf metrics |
 | `app/` | GPUI + bezel UI |

@@ -4,6 +4,7 @@ members = [
     "crates/chm-core",
     "crates/chm-cloud-api",
     "crates/chm-clickhouse",
+    "crates/chm-postgres",
     "crates/chm-update",
     "crates/chm-telemetry",
     "app",
@@ -19,6 +20,7 @@ license = "MIT"
 chm-core = { path = "crates/chm-core" }
 chm-cloud-api = { path = "crates/chm-cloud-api" }
 chm-clickhouse = { path = "crates/chm-clickhouse" }
+chm-postgres = { path = "crates/chm-postgres" }
 chm-update = { path = "crates/chm-update" }
 chm-telemetry = { path = "crates/chm-telemetry" }
 

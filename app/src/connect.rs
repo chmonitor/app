@@ -32,7 +32,8 @@ pub enum ConnectEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Cloud,
-    Direct,
+    ClickHouse,
+    Postgres,
 }
 
 /// Outcome of the last Test press.
@@ -52,6 +53,7 @@ pub struct ConnectFlow {
     url: Entity<TextField>,
     user: Entity<TextField>,
     password: Entity<TextField>,
+    database: Entity<TextField>,
     name: Entity<TextField>,
     test: TestState,
 }
@@ -78,17 +80,31 @@ impl ConnectFlow {
         };
         let initial = initial.unwrap_or_default();
         let mode = match initial.mode.as_deref() {
-            Some("clickhouse") => Mode::Direct,
+            Some("clickhouse") => Mode::ClickHouse,
+            Some("postgres") => Mode::Postgres,
             _ => Mode::Cloud,
+        };
+        let default_user = match mode {
+            Mode::Postgres => "postgres",
+            _ => "default",
         };
         Self {
             focus: cx.focus_handle(),
             mode,
             base_url: field(initial.base_url, "https://acme.dash.chmonitor.dev", cx),
             api_key: field(initial.api_key, "API key", cx),
-            url: field(initial.url, "http://localhost:8123", cx),
-            user: field(initial.user.or(Some("default".into())), "user", cx),
+            url: field(
+                initial.url,
+                if matches!(mode, Mode::Postgres) {
+                    "postgres://localhost:5432/postgres"
+                } else {
+                    "http://localhost:8123"
+                },
+                cx,
+            ),
+            user: field(initial.user.or(Some(default_user.into())), "user", cx),
             password: field(initial.password, "password", cx),
+            database: field(initial.database.or(Some("postgres".into())), "database", cx),
             name: field(None, "work (optional)", cx),
             test: TestState::Idle,
         }
@@ -114,13 +130,24 @@ impl ConnectFlow {
                     ..ProfileConfig::default()
                 })
             }
-            Mode::Direct => {
+            Mode::ClickHouse => {
                 let url = nonempty(Self::read(&self.url, cx))?;
                 Some(ProfileConfig {
                     mode: Some("clickhouse".into()),
                     url: Some(url),
                     user: nonempty(Self::read(&self.user, cx)),
                     password: nonempty(Self::read(&self.password, cx)),
+                    ..ProfileConfig::default()
+                })
+            }
+            Mode::Postgres => {
+                let url = nonempty(Self::read(&self.url, cx))?;
+                Some(ProfileConfig {
+                    mode: Some("postgres".into()),
+                    url: Some(url),
+                    user: nonempty(Self::read(&self.user, cx)),
+                    password: nonempty(Self::read(&self.password, cx)),
+                    database: nonempty(Self::read(&self.database, cx)),
                     ..ProfileConfig::default()
                 })
             }
@@ -279,26 +306,28 @@ impl Render for ConnectFlow {
         cx: &mut Context<Self>,
     ) -> impl bezel::gpui::IntoElement {
         let theme = Theme::of(cx).clone();
-        let (cloud_fields, direct_fields) = match self.mode {
-            Mode::Cloud => (
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.0))
-                    .child(Self::field_row("Base URL", &self.base_url))
-                    .child(Self::field_row("API key", &self.api_key)),
-                div(),
-            ),
-            Mode::Direct => (
-                div(),
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.0))
-                    .child(Self::field_row("URL", &self.url))
-                    .child(Self::field_row("User", &self.user))
-                    .child(Self::field_row("Password", &self.password)),
-            ),
+        let fields = match self.mode {
+            Mode::Cloud => div()
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .child(Self::field_row("Base URL", &self.base_url))
+                .child(Self::field_row("API key", &self.api_key)),
+            Mode::ClickHouse => div()
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .child(Self::field_row("URL", &self.url))
+                .child(Self::field_row("User", &self.user))
+                .child(Self::field_row("Password", &self.password)),
+            Mode::Postgres => div()
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .child(Self::field_row("URL", &self.url))
+                .child(Self::field_row("User", &self.user))
+                .child(Self::field_row("Password", &self.password))
+                .child(Self::field_row("Database", &self.database)),
         };
 
         div()
@@ -311,12 +340,12 @@ impl Render for ConnectFlow {
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
-                    .child(div().text_size(px(16.0)).child("Connect to ClickHouse"))
+                    .child(div().text_size(px(16.0)).child("Add a host"))
                     .child(
                         div()
                             .text_size(px(12.0))
                             .text_color(theme.text_muted)
-                            .child("Use the chmonitor cloud API or talk to your server directly."),
+                            .child("ClickHouse, Postgres, or the chmonitor cloud API."),
                     ),
             )
             .child(
@@ -333,14 +362,20 @@ impl Render for ConnectFlow {
                     ))
                     .child(self.mode_row(
                         &theme,
-                        "Direct",
-                        "ClickHouse HTTP endpoint · url + user + password",
-                        Mode::Direct,
+                        "ClickHouse",
+                        "HTTP endpoint · url + user + password",
+                        Mode::ClickHouse,
+                        cx,
+                    ))
+                    .child(self.mode_row(
+                        &theme,
+                        "Postgres",
+                        "libpq endpoint · url + user + password + database",
+                        Mode::Postgres,
                         cx,
                     )),
             )
-            .child(cloud_fields)
-            .child(direct_fields)
+            .child(fields)
             .child(Self::field_row("Name", &self.name))
             .child(self.status_line(cx))
             .child(

@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 use chm_clickhouse::ClickHouseClient;
 use chm_cloud_api::CloudClient;
 use chm_core::DataSource;
+use chm_postgres::PostgresClient;
 
 /// Saved connection profile (`[profile]` table, or `[profiles.<name>]`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -31,6 +32,12 @@ pub struct ProfileConfig {
     /// Direct mode: password.
     #[serde(default)]
     pub password: Option<String>,
+    /// Postgres: database name (default `postgres`).
+    #[serde(default)]
+    pub database: Option<String>,
+    /// Postgres: libpq sslmode (`disable` / `prefer` / `require`).
+    #[serde(default)]
+    pub sslmode: Option<String>,
     /// Release channel for the update check: "stable" | "beta".
     #[serde(default)]
     pub channel: Option<String>,
@@ -150,6 +157,7 @@ pub fn host_display(p: &ProfileConfig) -> String {
         Some("clickhouse") => {
             host_from_url(p.url.as_deref()).unwrap_or_else(|| "clickhouse".into())
         }
+        Some("postgres") => host_from_url(p.url.as_deref()).unwrap_or_else(|| "postgres".into()),
         _ => "host".into(),
     }
 }
@@ -261,6 +269,15 @@ pub fn source_from_profile(p: &ProfileConfig) -> Option<Box<dyn DataSource>> {
             p.user.clone().unwrap_or_else(|| "default".into()),
             p.password.clone(),
         ))),
+        "postgres" => PostgresClient::new(
+            p.url.clone()?,
+            p.user.clone(),
+            p.password.clone(),
+            p.database.clone(),
+            p.sslmode.clone(),
+        )
+        .ok()
+        .map(|c| Box::new(c) as Box<dyn DataSource>),
         _ => None,
     }
 }
@@ -438,6 +455,19 @@ user = "alice"
         })
         .unwrap();
         assert_eq!(src.label(), "clickhouse: http://ch:8123");
+    }
+
+    #[test]
+    fn postgres_source_from_profile() {
+        let src = source_from_profile(&ProfileConfig {
+            mode: Some("postgres".into()),
+            url: Some("postgres://localhost:5432/app".into()),
+            user: Some("alice".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(src.label().starts_with("postgres:"));
+        assert_eq!(src.engine(), chm_core::SourceEngine::Postgres);
     }
 
     #[test]

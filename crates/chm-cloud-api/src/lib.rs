@@ -401,6 +401,10 @@ impl DataSource for CloudClient {
         format!("cloud: {}", self.base_url)
     }
 
+    fn engine(&self) -> chm_core::SourceEngine {
+        chm_core::SourceEngine::Cloud
+    }
+
     /// GET /api/healthz (the one known-good route); any 2xx = reachable+authed.
     async fn ping(&self) -> Result<()> {
         let resp = self.request("healthz").await?;

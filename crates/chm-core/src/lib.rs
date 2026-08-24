@@ -41,6 +41,26 @@ pub enum DataSourceError {
 
 pub type Result<T> = std::result::Result<T, DataSourceError>;
 
+/// What kind of database a host speaks. Orthogonal to *where* credentials live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceEngine {
+    ClickHouse,
+    Cloud,
+    Postgres,
+    Mock,
+}
+
+impl SourceEngine {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::ClickHouse => "ch",
+            Self::Cloud => "cloud",
+            Self::Postgres => "pg",
+            Self::Mock => "mock",
+        }
+    }
+}
+
 /// Dashboard time ranges (matches web UI: 1h/6h/24h/7d/30d).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimeRange {
@@ -199,6 +219,12 @@ pub trait DataSource: Send + Sync {
     /// Human-readable label for status bar, e.g. "cloud: acme.dash.chmonitor.dev".
     fn label(&self) -> String;
 
+    /// Engine for this source. Defaults to ClickHouse so existing clients
+    /// stay fail-closed.
+    fn engine(&self) -> SourceEngine {
+        SourceEngine::ClickHouse
+    }
+
     /// Cheap connectivity/auth probe used by Connect screen and reconnects.
     async fn ping(&self) -> Result<()>;
 
@@ -231,6 +257,10 @@ impl MockDataSource {
 impl DataSource for MockDataSource {
     fn label(&self) -> String {
         self.label.clone()
+    }
+
+    fn engine(&self) -> SourceEngine {
+        SourceEngine::Mock
     }
 
     async fn ping(&self) -> Result<()> {

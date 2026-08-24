@@ -8,6 +8,7 @@ license.workspace = true
 chm-core.workspace = true
 chm-cloud-api.workspace = true
 chm-clickhouse.workspace = true
+chm-postgres.workspace = true
 chm-update.workspace = true
 chm-telemetry.workspace = true
 bezel.workspace = true

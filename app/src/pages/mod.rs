@@ -62,6 +62,14 @@ impl Page {
         matches!(self, Page::Overview | Page::Queries | Page::Traffic)
     }
 
+    /// ClickHouse-only pages are hidden on a Postgres host.
+    pub fn available(self, engine: chm_core::SourceEngine) -> bool {
+        match engine {
+            chm_core::SourceEngine::Postgres => !matches!(self, Page::Merges | Page::Traffic),
+            _ => true,
+        }
+    }
+
     /// Sidebar glyph. Text markers until Agent E's icon widget lands; the
     /// sidebar renders whatever this returns, so swapping in real icons is a
     /// one-file change.
@@ -124,5 +132,8 @@ mod tests {
         assert!(!Page::Connect.uses_range());
         assert_eq!(Page::Settings.title(), "Settings");
         assert!(!Page::ALL.contains(&Page::Settings));
+        assert!(!Page::Merges.available(chm_core::SourceEngine::Postgres));
+        assert!(Page::Queries.available(chm_core::SourceEngine::Postgres));
+        assert!(Page::Merges.available(chm_core::SourceEngine::ClickHouse));
     }
 }

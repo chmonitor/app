@@ -1,0 +1,18 @@
+[package]
+name = "chm-postgres"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chm-core.workspace = true
+chrono.workspace = true
+native-tls = "0.2"
+postgres-native-tls = "0.5"
+tokio.workspace = true
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
