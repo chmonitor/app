@@ -199,6 +199,7 @@ impl DataSource for PostgresClient {
 SELECT
   (SELECT count(*)::bigint FROM pg_stat_activity
     WHERE state = 'active' AND pid <> pg_backend_pid()) AS running_queries,
+  (SELECT count(*)::bigint FROM pg_database WHERE datallowconn) AS databases_total,
   (SELECT count(*)::bigint FROM pg_stat_user_tables) AS tables_total,
   (SELECT coalesce(sum(pg_database_size(oid)), 0)::bigint FROM pg_database) AS disk_used_bytes,
   extract(epoch FROM (now() - pg_postmaster_start_time()))::bigint AS uptime_seconds,
@@ -216,6 +217,7 @@ SELECT
                 .await
                 .map_err(map_pg_err)?;
             let running = get_i64(&row, "running_queries").max(0) as u64;
+            let databases = get_i64(&row, "databases_total").max(0) as u64;
             let tables = get_i64(&row, "tables_total").max(0) as u64;
             let disk = get_i64(&row, "disk_used_bytes").max(0) as u64;
             let uptime = get_i64(&row, "uptime_seconds").max(0) as u64;
@@ -233,6 +235,7 @@ SELECT
                 clickhouse_version: version,
                 replicas_total,
                 replicas_ok,
+                databases_total: databases,
                 ..Overview::default()
             })
         })

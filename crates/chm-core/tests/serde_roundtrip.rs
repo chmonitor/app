@@ -727,6 +727,8 @@ fn overview_round_trips_with_all_fields_populated() {
         disk_total_bytes: 1024_u64 * 1024 * 1024 * 1024,
         uptime_seconds: 86_400 * 12,
         clickhouse_version: "25.3.1.1 (smoke)".into(),
+        databases_total: 8,
+        queries_today: 48_210,
     };
     assert_eq!(rt(&overview), overview);
 }

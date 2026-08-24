@@ -378,7 +378,7 @@ Config (`config.toml`):
   auto_download = false   # fetch the archive without a click
   [ui]
   density = \"compact\"       # or comfortable
-  overview_metrics = []     # empty = qps, running, slow, failed, replicas, disk
+  overview_metrics = []     # empty = running, schema, disk, uptime
 ";
 
 impl Cli {

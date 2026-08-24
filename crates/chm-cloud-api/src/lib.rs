@@ -303,6 +303,8 @@ fn overview_of(v: &Value) -> Overview {
         disk_total_bytes: first_u64(v, &["disk_total_bytes", "disk_total", "total_bytes"]),
         uptime_seconds: first_u64(v, &["uptime_seconds", "uptime"]),
         clickhouse_version: first_str(v, &["clickhouse_version", "version", "ch_version"]),
+        databases_total: first_u64(v, &["databases_total", "databases"]),
+        queries_today: first_u64(v, &["queries_today", "today_queries"]),
     }
 }
 

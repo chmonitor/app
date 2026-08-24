@@ -1,8 +1,8 @@
 //! Layout density and which Overview metrics to show.
 //!
-//! Compact is the default: tighter chrome, the six metrics that answer
-//! "is this cluster healthy right now?", optional sparkline. Comfortable
-//! restores the roomier dashboard. Both are `[ui]` keys in config.toml.
+//! Compact is the default: tighter chrome, the four dash.chmonitor.dev
+//! KPI cards (active queries, schema, storage, uptime), optional sparkline.
+//! Comfortable restores the roomier dashboard. Both are `[ui]` keys.
 
 use crate::config::load_config;
 
@@ -103,8 +103,7 @@ impl Density {
 
     pub fn metrics_per_row(self) -> usize {
         match self {
-            Self::Compact => 3,
-            Self::Comfortable => 4,
+            Self::Compact | Self::Comfortable => 4,
         }
     }
 
@@ -140,72 +139,70 @@ impl Density {
 /// One Overview tile. Ids are the `[ui].overview_metrics` strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverviewMetric {
-    Qps,
     Running,
+    Schema,
+    Disk,
+    Uptime,
+    Qps,
     Slow,
     Failed,
     Merges,
     Replicas,
     Tables,
     Parts,
-    Disk,
-    Uptime,
     Version,
 }
 
 impl OverviewMetric {
-    pub const ALL: [OverviewMetric; 11] = [
-        Self::Qps,
+    pub const ALL: [OverviewMetric; 12] = [
         Self::Running,
+        Self::Schema,
+        Self::Disk,
+        Self::Uptime,
+        Self::Qps,
         Self::Slow,
         Self::Failed,
         Self::Merges,
         Self::Replicas,
         Self::Tables,
         Self::Parts,
-        Self::Disk,
-        Self::Uptime,
         Self::Version,
     ];
 
-    /// Default visible set: live load + replica/disk health.
-    pub const DEFAULT: [OverviewMetric; 6] = [
-        Self::Qps,
-        Self::Running,
-        Self::Slow,
-        Self::Failed,
-        Self::Replicas,
-        Self::Disk,
-    ];
+    /// Default visible set: the four dash.chmonitor.dev overview KPIs.
+    pub const DEFAULT: [OverviewMetric; 4] =
+        [Self::Running, Self::Schema, Self::Disk, Self::Uptime];
 
     pub fn id(self) -> &'static str {
         match self {
-            Self::Qps => "qps",
             Self::Running => "running",
+            Self::Schema => "schema",
+            Self::Disk => "disk",
+            Self::Uptime => "uptime",
+            Self::Qps => "qps",
             Self::Slow => "slow",
             Self::Failed => "failed",
             Self::Merges => "merges",
             Self::Replicas => "replicas",
             Self::Tables => "tables",
             Self::Parts => "parts",
-            Self::Disk => "disk",
-            Self::Uptime => "uptime",
             Self::Version => "version",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Running => "Active Queries",
+            Self::Schema => "Schema",
+            Self::Disk => "Storage",
+            Self::Uptime => "Uptime",
             Self::Qps => "queries / sec",
-            Self::Running => "running queries",
             Self::Slow => "slow · 24h",
             Self::Failed => "failed · 24h",
             Self::Merges => "active merges",
             Self::Replicas => "replicas",
             Self::Tables => "tables",
             Self::Parts => "parts",
-            Self::Disk => "disk used",
-            Self::Uptime => "uptime",
             Self::Version => "version",
         }
     }
@@ -246,13 +243,13 @@ mod tests {
         assert_eq!(Density::from_cfg(Some("COMFORTABLE")), Density::Comfortable);
         assert_eq!(Density::from_cfg(Some("nope")), Density::Compact);
         assert_eq!(Density::Compact.as_str(), "compact");
-        assert_eq!(Density::Comfortable.metrics_per_row(), 4);
+        assert_eq!(Density::Compact.metrics_per_row(), 4);
         assert!(Density::Compact.card_pad() < Density::Comfortable.card_pad());
         assert!(Density::Compact.chart_h() < Density::Comfortable.chart_h());
     }
 
     #[test]
-    fn visible_metrics_falls_back_to_default() {
+    fn visible_metrics_falls_back_to_dashboard_kpis() {
         assert_eq!(visible_metrics(&[]), OverviewMetric::DEFAULT);
         assert_eq!(
             visible_metrics(&["nope".into(), "also-nope".into()]),
@@ -263,10 +260,13 @@ mod tests {
             vec![OverviewMetric::Qps, OverviewMetric::Disk]
         );
         assert_eq!(
-            OverviewMetric::from_id("running"),
-            Some(OverviewMetric::Running)
+            OverviewMetric::from_id("schema"),
+            Some(OverviewMetric::Schema)
         );
         assert!(OverviewMetric::from_id("nope").is_none());
-        assert_eq!(default_metric_ids().len(), 6);
+        assert_eq!(
+            default_metric_ids(),
+            ["running", "schema", "disk", "uptime"]
+        );
     }
 }

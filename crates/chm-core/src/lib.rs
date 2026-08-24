@@ -129,6 +129,9 @@ pub struct TrafficSeries {
 }
 
 /// Headline numbers for the overview page.
+///
+/// The four dashboard KPIs on dash.chmonitor.dev are running queries
+/// (with queries today), schema (databases + tables), storage, and uptime.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Overview {
     pub qps: f64,
@@ -144,6 +147,12 @@ pub struct Overview {
     pub disk_total_bytes: u64,
     pub uptime_seconds: u64,
     pub clickhouse_version: String,
+    /// User databases, excluding `system` / `information_schema`.
+    #[serde(default)]
+    pub databases_total: u64,
+    /// QueryFinish rows on `today()` (dashboard `query-count-today`).
+    #[serde(default)]
+    pub queries_today: u64,
 }
 
 /// One query row (list views for running/slow/failed).
@@ -282,6 +291,8 @@ impl DataSource for MockDataSource {
             disk_total_bytes: 1024_u64 * 1024 * 1024 * 1024,
             uptime_seconds: 86_400 * 12,
             clickhouse_version: "25.3.1.1 (smoke)".into(),
+            databases_total: 8,
+            queries_today: 48_210,
         };
         // Vary by range so charts differ across selections in smoke shots.
         let mut o = base;
@@ -571,6 +582,8 @@ mod tests {
             assert_eq!(o.replicas_ok, 3);
             assert_eq!(o.replicas_total, 3);
             assert_eq!(o.tables_total, 142);
+            assert_eq!(o.databases_total, 8);
+            assert_eq!(o.queries_today, 48_210);
             assert_eq!(o.parts_total, 8931);
             assert_eq!(o.disk_used_bytes, 512 * 1024 * 1024 * 1024);
             assert_eq!(o.disk_total_bytes, 1024_u64 * 1024 * 1024 * 1024);

@@ -249,7 +249,7 @@ impl Render for SettingsPage {
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child("tiles on Overview — defaults to load, errors, replicas, disk"),
+                    .child("tiles on Overview — defaults to Active Queries, Schema, Storage, Uptime"),
             )
             .child({
                 let entity = cx.entity().downgrade();

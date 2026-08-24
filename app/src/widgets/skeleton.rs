@@ -14,7 +14,7 @@ pub fn metric_grid(cx: &App) -> impl IntoElement {
     let radius = cx.theme().radius;
     let d = Density::current();
     let per_row = d.metrics_per_row();
-    let rows = 6usize.div_ceil(per_row);
+    let rows = 4usize.div_ceil(per_row);
     div()
         .flex()
         .flex_col()

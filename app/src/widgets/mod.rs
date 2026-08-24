@@ -8,6 +8,6 @@ pub mod geometry;
 pub mod skeleton;
 pub mod table;
 
-pub use cards::metric_card;
+pub use cards::{kpi_card, metric_card};
 pub use chart::{NamedSeries, line_chart};
 pub use table::{CellVal, Column, data_table};
