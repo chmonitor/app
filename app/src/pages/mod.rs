@@ -1,7 +1,7 @@
-//! Page routing. AGENT D owns mod.rs; Agents F/G/H own the individual page
-//! files and will replace the placeholder bodies in shell.rs's `content`.
+//! Page routing.
 
-use bezel::gpui::{AnyElement, FontWeight, SharedString, div, prelude::*, px};
+use gpui::{App, FontWeight, SharedString, div, prelude::*};
+use gpui_component::{ActiveTheme as _, IconName};
 
 pub mod health;
 pub mod merges;
@@ -70,43 +70,35 @@ impl Page {
         }
     }
 
-    /// Sidebar glyph. Text markers until Agent E's icon widget lands; the
-    /// sidebar renders whatever this returns, so swapping in real icons is a
-    /// one-file change.
-    pub fn icon(self) -> AnyElement {
-        let glyph: &str = match self {
-            Page::Overview => "◧",
-            Page::Queries => "⌕",
-            Page::Merges => "⇄",
-            Page::Replicas => "⑃",
-            Page::Health => "♥",
-            Page::Tables => "▤",
-            Page::Traffic => "↕",
-            Page::Connect => "⌁",
-            Page::Settings => "⚙",
-        };
-        div()
-            .w(px(16.0))
-            .text_size(px(13.0))
-            .child(SharedString::from(glyph.to_string()))
-            .into_any_element()
+    pub fn icon(self) -> IconName {
+        match self {
+            Page::Overview => IconName::LayoutDashboard,
+            Page::Queries => IconName::Search,
+            Page::Merges => IconName::Replace,
+            Page::Replicas => IconName::Copy,
+            Page::Health => IconName::Heart,
+            Page::Tables => IconName::File,
+            Page::Traffic => IconName::ChartPie,
+            Page::Connect => IconName::Globe,
+            Page::Settings => IconName::Settings,
+        }
     }
 }
 
-pub(crate) fn status(text: impl Into<SharedString>) -> bezel::gpui::Div {
+pub(crate) fn status(text: impl Into<SharedString>, cx: &App) -> gpui::Div {
     div()
         .flex()
         .flex_1()
         .items_center()
         .justify_center()
-        .text_color(bezel::theme::ink(0.45))
-        .text_size(px(13.0))
+        .text_color(cx.theme().muted_foreground)
+        .text_sm()
         .child(text.into())
 }
 
-pub(crate) fn heading(title: &str) -> bezel::gpui::Div {
+pub(crate) fn heading(title: &str) -> gpui::Div {
     div()
-        .text_size(px(13.0))
+        .text_sm()
         .font_weight(FontWeight::SEMIBOLD)
         .child(SharedString::from(title.to_string()))
 }

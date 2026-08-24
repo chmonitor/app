@@ -1,6 +1,5 @@
 //! Reusable dashboard widgets: metric cards, line charts, data tables and
-//! their shared geometry math. Owned by Agent E; all gpui types flow through
-//! `bezel::gpui`.
+//! their shared geometry math.
 
 pub mod cards;
 pub mod chart;

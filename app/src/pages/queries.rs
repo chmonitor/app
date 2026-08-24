@@ -2,7 +2,8 @@
 
 use chm_core::QueryRow;
 
-use bezel::gpui::{AnyElement, Context, Render, div, prelude::*, px};
+use gpui::{AnyElement, App, Context, Render, Window, div, prelude::*, px};
+use gpui_component::ActiveTheme as _;
 
 use crate::pages::{heading, status};
 use crate::widgets::{CellVal, Column, data_table};
@@ -111,10 +112,15 @@ fn query_rows(rows: &[QueryRow], with_exception: bool) -> Vec<Vec<CellVal>> {
         .collect()
 }
 
-fn section(title: &str, rows: Option<&Vec<QueryRow>>, with_exception: bool) -> AnyElement {
+fn section(
+    title: &str,
+    rows: Option<&Vec<QueryRow>>,
+    with_exception: bool,
+    cx: &App,
+) -> AnyElement {
     let body: AnyElement = match rows {
-        None => status("loading…").into_any_element(),
-        Some(rows) if rows.is_empty() => status("none").into_any_element(),
+        None => status("loading…", cx).into_any_element(),
+        Some(rows) if rows.is_empty() => status("none", cx).into_any_element(),
         Some(rows) => data_table(
             query_columns(with_exception),
             query_rows(rows, with_exception),
@@ -124,35 +130,32 @@ fn section(title: &str, rows: Option<&Vec<QueryRow>>, with_exception: bool) -> A
     div()
         .flex()
         .flex_col()
-        .gap(px(6.0))
+        .gap(px(6.))
         .child(heading(title))
         .child(body)
         .into_any_element()
 }
 
 impl Render for QueriesPage {
-    fn render(
-        &mut self,
-        _window: &mut bezel::gpui::Window,
-        _cx: &mut Context<Self>,
-    ) -> impl bezel::gpui::IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.running.is_none() && self.slow.is_none() && self.failed.is_none() {
             if let Some(err) = &self.error {
-                return status(format!("queries unavailable: {err}"));
+                return status(format!("queries unavailable: {err}"), cx).into_any_element();
             }
-            return status("loading queries…");
+            return status("loading queries…", cx).into_any_element();
         }
-        let mut col = div().flex().flex_col().gap(px(16.0)).w_full();
+        let mut col = div().flex().flex_col().gap(px(16.)).w_full();
         if let Some(err) = &self.error {
             col = col.child(
                 div()
-                    .text_size(px(12.0))
-                    .text_color(bezel::theme::ink(0.6))
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
                     .child(format!("partial: {err}")),
             );
         }
-        col.child(section("Running", self.running.as_ref(), false))
-            .child(section("Slow", self.slow.as_ref(), false))
-            .child(section("Failed", self.failed.as_ref(), true))
+        col.child(section("Running", self.running.as_ref(), false, cx))
+            .child(section("Slow", self.slow.as_ref(), false, cx))
+            .child(section("Failed", self.failed.as_ref(), true, cx))
+            .into_any_element()
     }
 }

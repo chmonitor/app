@@ -2,7 +2,7 @@
 
 use chm_core::Health;
 
-use bezel::gpui::{Context, Render, div, prelude::*, px};
+use gpui::{Context, Render, Window, div, prelude::*, px};
 
 use crate::pages::status;
 use crate::widgets::geometry::format_duration_ms;
@@ -40,16 +40,12 @@ impl HealthPage {
 }
 
 impl Render for HealthPage {
-    fn render(
-        &mut self,
-        _window: &mut bezel::gpui::Window,
-        _cx: &mut Context<Self>,
-    ) -> impl bezel::gpui::IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(err) = &self.error {
-            return status(format!("health unavailable: {err}"));
+            return status(format!("health unavailable: {err}"), cx).into_any_element();
         }
         let Some(h) = &self.data else {
-            return status("loading health…");
+            return status("loading health…", cx).into_any_element();
         };
         let pool_pct = format!(
             "{:.0}%",
@@ -58,27 +54,30 @@ impl Render for HealthPage {
         div()
             .flex()
             .flex_col()
-            .gap(px(10.0))
+            .gap(px(10.))
             .w_full()
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .gap(px(10.0))
+                    .gap(px(10.))
                     .child(metric_card(
                         "status",
                         if h.ok { "ok" } else { "not ok" },
                         None,
+                        cx,
                     ))
                     .child(metric_card(
                         "readonly tables",
                         &h.readonly_tables.to_string(),
                         None,
+                        cx,
                     ))
                     .child(metric_card(
                         "replication lag",
                         &format_duration_ms(h.replication_lag_max_sec * 1000.0),
                         None,
+                        cx,
                     ))
                     .child(metric_card(
                         "zookeeper",
@@ -88,24 +87,28 @@ impl Render for HealthPage {
                             "unavailable"
                         },
                         None,
+                        cx,
                     )),
             )
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .gap(px(10.0))
+                    .gap(px(10.))
                     .child(metric_card(
                         "delayed inserts",
                         &h.delayed_inserts.to_string(),
                         None,
+                        cx,
                     ))
                     .child(metric_card(
                         "distributed files",
                         &h.distributed_files_to_insert.to_string(),
                         None,
+                        cx,
                     ))
-                    .child(metric_card("background pool", &pool_pct, None)),
+                    .child(metric_card("background pool", &pool_pct, None, cx)),
             )
+            .into_any_element()
     }
 }

@@ -2,7 +2,7 @@
 
 use chm_core::ReplicaRow;
 
-use bezel::gpui::{Context, Render, prelude::*};
+use gpui::{Context, Render, Window, prelude::*};
 
 use crate::pages::status;
 use crate::widgets::{CellVal, Column, data_table};
@@ -39,19 +39,15 @@ impl ReplicasPage {
 }
 
 impl Render for ReplicasPage {
-    fn render(
-        &mut self,
-        _window: &mut bezel::gpui::Window,
-        _cx: &mut Context<Self>,
-    ) -> impl bezel::gpui::IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(err) = &self.error {
-            return status(format!("replicas unavailable: {err}")).into_any_element();
+            return status(format!("replicas unavailable: {err}"), cx).into_any_element();
         }
         let Some(rows) = &self.data else {
-            return status("loading replicas…").into_any_element();
+            return status("loading replicas…", cx).into_any_element();
         };
         if rows.is_empty() {
-            return status("no replicas").into_any_element();
+            return status("no replicas", cx).into_any_element();
         }
         let columns = vec![
             Column {

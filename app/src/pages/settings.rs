@@ -2,15 +2,54 @@
 //! app menu (`cmd-,`) or the sidebar footer. Writes `[ui]` / `[telemetry]`
 //! / `profile.channel` in config.toml.
 
-use bezel::gpui::{Context, Render, SharedString, Window, div, prelude::*, px};
-use bezel::theme::{Theme, appearance::AppearanceMode};
 use chm_update::Channel;
+use gpui::{App, Context, Render, Window, div, prelude::*, px};
+use gpui_component::{
+    ActiveTheme as _, Theme, ThemeMode,
+    radio::{Radio, RadioGroup},
+    v_flex,
+};
 
 use crate::config::{config_path, load_config, save_config};
 use crate::pages::heading;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Appearance {
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    const ALL: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|&m| m == self).unwrap_or(0)
+    }
+
+    fn from_index(i: usize) -> Self {
+        Self::ALL.get(i).copied().unwrap_or(Appearance::System)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Self::System => "follow macOS light/dark",
+            Self::Light => "always light",
+            Self::Dark => "always dark",
+        }
+    }
+}
+
 pub struct SettingsPage {
-    appearance: AppearanceMode,
+    appearance: Appearance,
     channel: Channel,
     telemetry: bool,
     status: Option<String>,
@@ -41,9 +80,9 @@ impl SettingsPage {
         self.status = save_config(&cfg).err();
     }
 
-    fn set_appearance(&mut self, mode: AppearanceMode, cx: &mut Context<Self>) {
+    fn set_appearance(&mut self, mode: Appearance, window: &mut Window, cx: &mut Context<Self>) {
         self.appearance = mode;
-        bezel::theme::appearance::set_mode(mode, cx);
+        apply_appearance(mode, window, cx);
         self.persist();
         cx.notify();
     }
@@ -59,83 +98,10 @@ impl SettingsPage {
         self.persist();
         cx.notify();
     }
-
-    fn choice_row(
-        &self,
-        theme: &Theme,
-        id: &'static str,
-        title: (&'static str, &'static str),
-        selected: bool,
-        on: impl Fn(&mut Self, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> impl bezel::gpui::IntoElement {
-        let (label, hint) = title;
-        div()
-            .id(SharedString::from(id))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(10.0))
-            .px(px(12.0))
-            .py(px(8.0))
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(if selected {
-                theme.border_strong
-            } else {
-                theme.border
-            })
-            .bg(if selected {
-                theme.element_active
-            } else {
-                theme.input_bg
-            })
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.element_hover))
-            .on_click(cx.listener(move |this, _, _, cx| on(this, cx)))
-            .child(
-                div()
-                    .size(px(14.0))
-                    .rounded_full()
-                    .border_1()
-                    .border_color(theme.border_strong)
-                    .when(selected, |dot| dot.bg(theme.accent)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(div().text_size(px(13.0)).child(label))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_muted)
-                            .child(hint),
-                    ),
-            )
-    }
-
-    fn section(
-        title: &str,
-        children: impl IntoIterator<Item = bezel::gpui::AnyElement>,
-    ) -> bezel::gpui::Div {
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(heading(title))
-            .children(children)
-    }
 }
 
 impl Render for SettingsPage {
-    fn render(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl bezel::gpui::IntoElement {
-        let theme = Theme::of(cx).clone();
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let path = config_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(no config directory)".into());
@@ -143,138 +109,131 @@ impl Render for SettingsPage {
         let channel = self.channel;
         let telemetry = self.telemetry;
 
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(20.0))
-            .max_w(px(520.0))
-            .child(Self::section(
-                "Appearance",
-                AppearanceMode::ALL.iter().map(|&mode| {
-                    self.choice_row(
-                        &theme,
-                        match mode {
-                            AppearanceMode::System => "app-system",
-                            AppearanceMode::Light => "app-light",
-                            AppearanceMode::Dark => "app-dark",
-                        },
-                        (
-                            mode.label(),
-                            match mode {
-                                AppearanceMode::System => "follow macOS light/dark",
-                                AppearanceMode::Light => "always light",
-                                AppearanceMode::Dark => "always dark",
-                            },
+        v_flex()
+            .gap_5()
+            .max_w(px(520.))
+            .child(heading("Appearance"))
+            .child(
+                RadioGroup::vertical("appearance")
+                    .children(Appearance::ALL.iter().map(|&mode| {
+                        Radio::new(mode.label()).label(mode.label()).child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(mode.hint()),
+                        )
+                    }))
+                    .selected_index(Some(appearance.index()))
+                    .on_click(cx.listener(|this, index: &usize, window, cx| {
+                        this.set_appearance(Appearance::from_index(*index), window, cx);
+                    })),
+            )
+            .child(heading("Updates"))
+            .child(
+                RadioGroup::vertical("channel")
+                    .child(
+                        Radio::new("stable").label("Stable").child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("tagged releases"),
                         ),
-                        appearance == mode,
-                        move |this, cx| this.set_appearance(mode, cx),
-                        cx,
                     )
-                    .into_any_element()
-                }),
-            ))
-            .child(Self::section(
-                "Updates",
-                [
-                    self.choice_row(
-                        &theme,
-                        "ch-stable",
-                        ("Stable", "tagged releases"),
-                        channel == Channel::Stable,
-                        |this, cx| this.set_channel(Channel::Stable, cx),
-                        cx,
+                    .child(
+                        Radio::new("beta").label("Beta").child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("pre-release builds"),
+                        ),
                     )
-                    .into_any_element(),
-                    self.choice_row(
-                        &theme,
-                        "ch-beta",
-                        ("Beta", "pre-release builds"),
-                        channel == Channel::Beta,
-                        |this, cx| this.set_channel(Channel::Beta, cx),
-                        cx,
+                    .selected_index(Some(if channel == Channel::Stable { 0 } else { 1 }))
+                    .on_click(cx.listener(|this, index: &usize, _, cx| {
+                        this.set_channel(
+                            if *index == 0 {
+                                Channel::Stable
+                            } else {
+                                Channel::Beta
+                            },
+                            cx,
+                        );
+                    })),
+            )
+            .child(heading("Telemetry"))
+            .child(
+                RadioGroup::vertical("telemetry")
+                    .child(
+                        Radio::new("off").label("Off").child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("nothing is recorded or sent (default)"),
+                        ),
                     )
-                    .into_any_element(),
-                ],
-            ))
-            .child(Self::section(
-                "Telemetry",
-                [
-                    self.choice_row(
-                        &theme,
-                        "tel-off",
-                        ("Off", "nothing is recorded or sent (default)"),
-                        !telemetry,
-                        |this, cx| this.set_telemetry(false, cx),
-                        cx,
+                    .child(
+                        Radio::new("on").label("On").child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("local fetch timings only; no query text"),
+                        ),
                     )
-                    .into_any_element(),
-                    self.choice_row(
-                        &theme,
-                        "tel-on",
-                        ("On", "local fetch timings only; no query text"),
-                        telemetry,
-                        |this, cx| this.set_telemetry(true, cx),
-                        cx,
-                    )
-                    .into_any_element(),
-                ],
-            ))
-            .child(Self::section(
-                "Shortcuts",
-                [div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.text_muted)
+                    .selected_index(Some(if telemetry { 1 } else { 0 }))
+                    .on_click(cx.listener(|this, index: &usize, _, cx| {
+                        this.set_telemetry(*index == 1, cx);
+                    })),
+            )
+            .child(heading("Shortcuts"))
+            .child(
+                v_flex()
+                    .gap_1()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
                     .child("1–8   switch page")
                     .child("r     refresh")
                     .child("⌘B    toggle sidebar")
                     .child("⌘,    settings")
-                    .child("⌘Q    quit")
-                    .into_any_element()],
-            ))
+                    .child("⌘Q    quit"),
+            )
+            .child(heading("Config file"))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(heading("Config file"))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme.text_muted)
-                            .child(format!("chmonitor {}", env!("CARGO_PKG_VERSION"))),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme.text_muted)
-                            .child(path),
-                    ),
+                v_flex()
+                    .gap_1()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("chmonitor {}", env!("CARGO_PKG_VERSION")))
+                    .child(path),
             )
             .children(self.status.as_ref().map(|e| {
                 div()
-                    .text_size(px(12.0))
-                    .text_color(theme.danger)
+                    .text_sm()
+                    .text_color(cx.theme().danger)
                     .child(e.clone())
             }))
     }
 }
 
-pub fn appearance_from_cfg(s: Option<&str>) -> AppearanceMode {
-    match s.map(|s| s.to_ascii_lowercase()).as_deref() {
-        Some("light") => AppearanceMode::Light,
-        Some("dark") => AppearanceMode::Dark,
-        _ => AppearanceMode::System,
+pub fn apply_appearance(mode: Appearance, window: &mut Window, cx: &mut App) {
+    match mode {
+        Appearance::Light => Theme::change(ThemeMode::Light, Some(window), cx),
+        Appearance::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
+        Appearance::System => Theme::sync_system_appearance(Some(window), cx),
     }
 }
 
-fn appearance_to_cfg(mode: AppearanceMode) -> &'static str {
+pub fn appearance_from_cfg(s: Option<&str>) -> Appearance {
+    match s.map(|s| s.to_ascii_lowercase()).as_deref() {
+        Some("light") => Appearance::Light,
+        Some("dark") => Appearance::Dark,
+        _ => Appearance::System,
+    }
+}
+
+fn appearance_to_cfg(mode: Appearance) -> &'static str {
     match mode {
-        AppearanceMode::System => "system",
-        AppearanceMode::Light => "light",
-        AppearanceMode::Dark => "dark",
+        Appearance::System => "system",
+        Appearance::Light => "light",
+        Appearance::Dark => "dark",
     }
 }
 
@@ -291,11 +250,11 @@ mod tests {
 
     #[test]
     fn appearance_and_channel_parse() {
-        assert_eq!(appearance_from_cfg(None), AppearanceMode::System);
-        assert_eq!(appearance_from_cfg(Some("DARK")), AppearanceMode::Dark);
-        assert_eq!(appearance_from_cfg(Some("light")), AppearanceMode::Light);
+        assert_eq!(appearance_from_cfg(None), Appearance::System);
+        assert_eq!(appearance_from_cfg(Some("DARK")), Appearance::Dark);
+        assert_eq!(appearance_from_cfg(Some("light")), Appearance::Light);
         assert_eq!(channel_from_cfg(Some("beta")), Channel::Beta);
         assert_eq!(channel_from_cfg(None), Channel::Stable);
-        assert_eq!(appearance_to_cfg(AppearanceMode::Dark), "dark");
+        assert_eq!(appearance_to_cfg(Appearance::Dark), "dark");
     }
 }

@@ -1,18 +1,10 @@
-//! Metric card: a labeled headline number with an optional sub-line, painted
-//! from the theme tokens without needing an `App` in scope.
+//! Metric card: a labeled headline number with an optional sub-line.
 
-use bezel::gpui::{div, prelude::*, px};
-use bezel::theme::{Theme, current_appearance};
-
-/// Resolve the theme without a context: the process-wide appearance mirror
-/// plus the palette builder give exactly what `Theme::of(cx)` would return.
-pub(crate) fn theme_now() -> Theme {
-    Theme::for_appearance(current_appearance())
-}
+use gpui::{App, FontWeight, div, prelude::*, px};
+use gpui_component::ActiveTheme as _;
 
 /// A stat tile: small muted label, large value, optional muted sub-line.
-pub fn metric_card(label: &str, value: &str, sub: Option<&str>) -> impl IntoElement {
-    let t = theme_now();
+pub fn metric_card(label: &str, value: &str, sub: Option<&str>, cx: &App) -> impl IntoElement {
     let label = label.to_string();
     let value = value.to_string();
     let sub = sub.map(str::to_string);
@@ -20,25 +12,31 @@ pub fn metric_card(label: &str, value: &str, sub: Option<&str>) -> impl IntoElem
     div()
         .flex()
         .flex_col()
-        .gap(px(4.0))
-        .p(px(12.0))
-        .min_w(px(140.0))
+        .gap(px(4.))
+        .p(px(12.))
+        .min_w(px(140.))
         .flex_1()
-        .bg(t.surface_card)
+        .bg(cx.theme().secondary)
         .border_1()
-        .border_color(t.border)
-        .rounded(px(Theme::PANEL_RADIUS))
+        .border_color(cx.theme().border)
+        .rounded(cx.theme().radius)
         .child(
             div()
-                .text_size(px(11.0))
-                .text_color(t.text_muted)
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
                 .child(label),
         )
-        .child(div().text_size(px(20.0)).text_color(t.text).child(value))
+        .child(
+            div()
+                .text_xl()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(cx.theme().foreground)
+                .child(value),
+        )
         .children(sub.map(|sub| {
             div()
-                .text_size(px(11.0))
-                .text_color(t.text_faint)
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
                 .child(sub)
         }))
 }

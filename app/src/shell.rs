@@ -1,9 +1,5 @@
 //! App shell — window layout, sidebar nav, page routing, status bar,
 //! 30-second poll loop and the startup update-check hook.
-//! AGENT D OWNS THIS FILE.
-//!
-//! All gpui types come through `bezel::gpui`; widgets come from the bezel
-//! facade (`bezel::theme`, `bezel::ui`).
 
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -13,12 +9,21 @@ use chm_core::{
     TableStat, TimeRange, TrafficSeries,
 };
 
-use bezel::gpui::{
+use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, Focusable, Hsla, KeyBinding,
     KeyDownEvent, Render, SharedString, WeakEntity, Window, actions, div, prelude::*, px,
 };
-use bezel::theme::Theme;
-use bezel::ui::widgets::status_dot;
+use gpui_component::{
+    ActiveTheme as _, IconName, Root, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
+    sidebar::{
+        Sidebar, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem,
+        SidebarToggleButton,
+    },
+    status_bar::StatusBar,
+    v_flex,
+};
 
 use crate::config::{
     ConfigFile, Host, ProfileConfig, active_host_id, cli, config_path, list_hosts, load_config,
@@ -43,7 +48,6 @@ const POLL_SECS: u64 = 30;
 const COMPACT_BELOW: f32 = 900.0;
 /// Sidebar width expanded / collapsed.
 const SIDEBAR_W: f32 = 190.0;
-const SIDEBAR_W_COMPACT: f32 = 48.0;
 
 /// Perf metrics live for the whole process; recording is gated by
 /// `[telemetry] enabled=true` in config.toml (never on by default).
@@ -65,11 +69,11 @@ pub enum ConnState {
 }
 
 impl ConnState {
-    fn dot(self, theme: &Theme) -> Hsla {
+    fn color(self, cx: &App) -> Hsla {
         match self {
-            Self::Connected => theme.success,
-            Self::Connecting => theme.warning,
-            Self::Error => theme.danger,
+            Self::Connected => cx.theme().green,
+            Self::Connecting => cx.theme().warning,
+            Self::Error => cx.theme().danger,
         }
     }
 }
@@ -110,7 +114,6 @@ pub struct Shell {
     /// `None` follows the viewport; `Some` is a click/`cmd-b` override.
     sidebar_collapsed: Option<bool>,
     active_host: Option<String>,
-    host_menu_open: bool,
     host_status: HostStatus,
 }
 
@@ -148,7 +151,7 @@ impl Shell {
         }
     }
 
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (source, conn, active_host) = Self::pick_source();
 
         // Telemetry hook: opt-in only. Recording stays off unless the user
@@ -212,12 +215,11 @@ impl Shell {
             health: cx.new(|_| HealthPage::new()),
             tables: cx.new(|_| TablesPage::new()),
             traffic: cx.new(|_| TrafficPage::new()),
-            connect: cx.new(|cx| ConnectFlow::new(load_profile(), cx)),
+            connect: cx.new(|cx| ConnectFlow::new(load_profile(), window, cx)),
             settings: cx.new(|_| SettingsPage::new()),
             update_note: None,
             sidebar_collapsed: None,
             active_host,
-            host_menu_open: false,
             host_status: HostStatus::default(),
         };
 
@@ -268,18 +270,15 @@ impl Shell {
             ConnState::Error
         };
         self.host_status = HostStatus::default();
-        self.host_menu_open = false;
         self.last_error = None;
     }
 
     fn switch_host(&mut self, host_id: String, cx: &mut Context<Self>) {
         if self.active_host.as_deref() == Some(host_id.as_str()) {
-            self.host_menu_open = false;
             cx.notify();
             return;
         }
         if std::env::var("CHM_SMOKE").is_ok() {
-            self.host_menu_open = false;
             cx.notify();
             return;
         }
@@ -478,283 +477,111 @@ impl Shell {
         }
     }
 
+    fn host_icon(mode: Option<&str>) -> IconName {
+        match mode {
+            Some("postgres") => IconName::HardDrive,
+            Some("cloud") => IconName::Globe,
+            _ => IconName::Cpu,
+        }
+    }
+
     // -- rendering ----------------------------------------------------------
 
-    fn sidebar_toggle(
-        &self,
-        theme: &Theme,
-        compact: bool,
-        cx: &mut Context<Self>,
-    ) -> impl bezel::gpui::IntoElement {
-        let glyph = if compact { "›" } else { "‹" };
-        let label = if compact {
-            div().child(SharedString::from(glyph))
-        } else {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .w_full()
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme.text_faint)
-                        .child("Sidebar"),
-                )
-                .child(
-                    div()
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(glyph)),
-                )
-        };
-        div()
-            .id("sidebar-toggle")
-            .w_full()
-            .px(px(if compact { 0.0 } else { 12.0 }))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.element_hover))
-            .text_size(px(13.0))
-            .when(compact, |el| el.flex().justify_center())
-            .on_click(
-                cx.listener(|this, _: &bezel::gpui::ClickEvent, window, cx| {
-                    this.toggle_sidebar(window.viewport_size().width < px(COMPACT_BELOW), cx);
-                }),
-            )
-            .child(label)
-    }
+    fn render_sidebar(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let engine = self.source_engine();
+        let active_host = self.active_host.clone();
+        let hosts = self.hosts();
 
-    fn host_switcher(
-        &self,
-        theme: &Theme,
-        compact: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let label = self.active_host_label();
-        let chevron = if self.host_menu_open { "▴" } else { "▾" };
-        let trigger = div()
-            .id("host-switcher")
-            .w_full()
-            .px(px(if compact { 0.0 } else { 12.0 }))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.element_hover))
-            .when(compact, |el| el.flex().justify_center())
-            .on_click(cx.listener(|this, _: &bezel::gpui::ClickEvent, _, cx| {
-                this.host_menu_open = !this.host_menu_open;
-                cx.notify();
-            }))
-            .child(if compact {
-                div().child(status_dot(self.conn.dot(theme)))
-            } else {
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .w_full()
-                    .child(status_dot(self.conn.dot(theme)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(13.0))
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(theme.text_faint)
-                            .child(chevron),
-                    )
-            });
-
-        let mut col = div().flex().flex_col().gap(px(2.0)).child(trigger);
-        if self.host_menu_open {
-            let active = self.active_host.clone();
-            for host in self.hosts() {
-                let id = host.id.clone();
-                let selected = active.as_deref() == Some(id.as_str());
-                let tag = match host.profile.mode.as_deref() {
-                    Some("postgres") => " pg",
-                    Some("clickhouse") => " ch",
-                    Some("cloud") => " cloud",
-                    _ => "",
-                };
-                let row_label = format!("{}{tag}", host.label);
-                col = col.child(
-                    div()
-                        .id(SharedString::from(format!("host-{id}")))
-                        .w_full()
-                        .px(px(if compact { 0.0 } else { 12.0 }))
-                        .py(px(5.0))
-                        .rounded(px(6.0))
-                        .cursor_pointer()
-                        .when(selected, |el| el.bg(theme.element_active))
-                        .hover(|s| s.bg(theme.element_hover))
-                        .text_size(px(12.0))
-                        .when(compact, |el| el.flex().justify_center())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.switch_host(id.clone(), cx);
-                        }))
-                        .child(if compact {
-                            div()
-                                .text_size(px(10.0))
-                                .child(row_label.chars().next().unwrap_or('·').to_string())
-                        } else {
-                            div().truncate().child(row_label)
-                        }),
-                );
-            }
-            col = col.child(
-                div()
-                    .id("host-add")
-                    .w_full()
-                    .px(px(if compact { 0.0 } else { 12.0 }))
-                    .py(px(5.0))
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.element_hover))
-                    .text_size(px(12.0))
-                    .text_color(theme.text_muted)
-                    .when(compact, |el| el.flex().justify_center())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.host_menu_open = false;
-                        this.page = Page::Connect;
-                        cx.notify();
-                    }))
-                    .child(if compact {
-                        SharedString::from("+")
-                    } else {
-                        SharedString::from("+ Add host")
-                    }),
+        let mut host_menu = SidebarMenu::new();
+        for host in hosts {
+            let id = host.id.clone();
+            let selected = active_host.as_deref() == Some(id.as_str());
+            let icon = Self::host_icon(host.profile.mode.as_deref());
+            host_menu = host_menu.child(
+                SidebarMenuItem::new(host.label.clone())
+                    .icon(icon)
+                    .active(selected)
+                    .on_click(cx.listener(move |this, _, _, cx| this.switch_host(id.clone(), cx))),
             );
         }
-        col
-    }
+        host_menu = host_menu.child(
+            SidebarMenuItem::new("Add host")
+                .icon(IconName::Plus)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.page = Page::Connect;
+                    cx.notify();
+                })),
+        );
 
-    fn sidebar(&self, theme: &Theme, compact: bool, cx: &mut Context<Self>) -> bezel::gpui::Div {
-        let engine = self.source_engine();
-        let items: Vec<bezel::gpui::AnyElement> = Page::ALL
+        let mut nav = SidebarMenu::new();
+        for (i, page) in Page::ALL
             .iter()
             .copied()
             .filter(|page| page.available(engine))
             .enumerate()
-            .map(|(i, page)| {
-                let active = page == self.page;
-                let hotkey = format!("{}", i + 1);
-                let label = if compact {
-                    div().child(page.icon())
-                } else {
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(page.icon())
-                        .child(div().child(page.title()))
-                        .child(
-                            div()
-                                .ml(px(2.0))
-                                .text_size(px(10.0))
-                                .text_color(theme.text_faint)
-                                .child(hotkey),
-                        )
-                };
-                div()
-                    .id(SharedString::from(format!("nav-{}", page.title())))
-                    .w_full()
-                    .px(px(if compact { 0.0 } else { 12.0 }))
-                    .py(px(6.0))
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .when(active, |el| el.bg(theme.element_active))
-                    .hover(|s| s.bg(theme.element_hover))
-                    .text_size(px(13.0))
-                    .text_color(if active { theme.text } else { theme.text_muted })
-                    .on_click(
-                        cx.listener(move |this, _: &bezel::gpui::ClickEvent, _, cx| {
-                            this.goto(page, cx);
-                        }),
-                    )
-                    .child(label)
-            })
-            .map(bezel::gpui::IntoElement::into_any_element)
-            .collect();
-
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .when(compact, |col| col.items_center())
-            .children(items)
-    }
-
-    fn settings_nav(
-        &self,
-        theme: &Theme,
-        compact: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let active = self.page == Page::Settings;
-        let label = if compact {
-            div().child(Page::Settings.icon())
-        } else {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(Page::Settings.icon())
-                .child(div().child(Page::Settings.title()))
-                .child(
-                    div()
-                        .ml(px(2.0))
-                        .text_size(px(10.0))
-                        .text_color(theme.text_faint)
-                        .child("⌘,"),
-                )
-        };
-        div()
-            .id("nav-Settings")
-            .w_full()
-            .px(px(if compact { 0.0 } else { 12.0 }))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .when(active, |el| el.bg(theme.element_active))
-            .hover(|s| s.bg(theme.element_hover))
-            .text_size(px(13.0))
-            .text_color(if active { theme.text } else { theme.text_muted })
-            .when(compact, |el| el.flex().justify_center())
-            .on_click(cx.listener(|this, _: &bezel::gpui::ClickEvent, _, cx| {
-                this.page = Page::Settings;
-                cx.notify();
-            }))
-            .child(label)
-    }
-
-    fn range_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> bezel::gpui::Div {
-        let mut row = div().flex().flex_row().items_center().gap(px(4.0));
-        for range in TimeRange::ALL {
-            let active = self.range == range;
-            row = row.child(
-                div()
-                    .id(SharedString::from(format!("range-{}", range.label())))
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .text_size(px(11.5))
-                    .when(active, |el| {
-                        el.bg(theme.element_active).text_color(theme.text)
+        {
+            let active = page == self.page;
+            let hotkey = format!("{}", i + 1);
+            nav = nav.child(
+                SidebarMenuItem::new(page.title())
+                    .icon(page.icon())
+                    .active(active)
+                    .suffix({
+                        let hotkey = hotkey.clone();
+                        let muted = cx.theme().muted_foreground;
+                        move |_, _| div().text_xs().text_color(muted).child(hotkey.clone())
                     })
-                    .when(!active, |el| el.text_color(theme.text_muted))
-                    .hover(|s| s.bg(theme.element_hover))
+                    .on_click(cx.listener(move |this, _, _, cx| this.goto(page, cx))),
+            );
+        }
+
+        Sidebar::new("nav")
+            .collapsed(compact)
+            .collapsible(true)
+            .w(px(SIDEBAR_W))
+            .header(
+                SidebarHeader::new().child(
+                    h_flex().w_full().items_center().justify_between().child(
+                        SidebarToggleButton::new()
+                            .collapsed(compact)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_sidebar(
+                                    window.viewport_size().width < px(COMPACT_BELOW),
+                                    cx,
+                                );
+                            })),
+                    ),
+                ),
+            )
+            .child(SidebarGroup::new("Host").child(host_menu))
+            .child(SidebarGroup::new("Monitor").child(nav))
+            .child(
+                SidebarGroup::new("App").child(
+                    SidebarMenu::new().child(
+                        SidebarMenuItem::new(Page::Settings.title())
+                            .icon(Page::Settings.icon())
+                            .active(self.page == Page::Settings)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.page = Page::Settings;
+                                cx.notify();
+                            })),
+                    ),
+                ),
+            )
+            .footer(SidebarFooter::new().child("chmonitor"))
+    }
+
+    fn range_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .items_center()
+            .gap_1()
+            .children(TimeRange::ALL.into_iter().map(|range| {
+                let active = self.range == range;
+                Button::new(SharedString::from(format!("range-{}", range.label())))
+                    .xsmall()
+                    .when(active, |b| b.primary())
+                    .when(!active, |b| b.ghost())
+                    .label(range.label())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.range != range {
                             this.range = range;
@@ -762,20 +589,12 @@ impl Shell {
                             cx.notify();
                         }
                     }))
-                    .child(range.label()),
-            );
-        }
-        row
+            }))
     }
 
-    fn status_bar(&self, theme: &Theme) -> bezel::gpui::Div {
-        let host = SharedString::from(self.active_host_label());
-        let status = SharedString::from(self.host_status_text());
-        let status_color = match self.conn {
-            ConnState::Error => theme.danger,
-            ConnState::Connecting => theme.warning,
-            ConnState::Connected => theme.text_muted,
-        };
+    fn status_bar(&self, cx: &Context<Self>) -> impl IntoElement {
+        let host = self.active_host_label();
+        let status = self.host_status_text();
         let refreshed = match self.last_refresh {
             Some(at) => format!("updated {}", at.format("%H:%M:%S")),
             None => "not refreshed yet".to_string(),
@@ -785,43 +604,28 @@ impl Shell {
             Some(UpdateNote(t)) if !t.is_empty() => Some(t.clone()),
             Some(_) => None,
         };
-
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(12.0))
-            .px(px(12.0))
-            .py(px(6.0))
-            .border_t_1()
-            .border_color(theme.border)
-            .bg(theme.surface)
-            .text_size(px(11.5))
-            .text_color(theme.text_muted)
-            .child(status_dot(self.conn.dot(theme)))
-            .child(div().min_w_0().truncate().child(host))
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .truncate()
-                    .text_color(status_color)
-                    .child(status),
+        StatusBar::new()
+            .left(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().size_2().rounded_full().bg(self.conn.color(cx)))
+                    .child(host),
             )
-            .child(div().child(refreshed))
-            .children(note.map(|t| div().text_color(theme.text_faint).child(t)))
+            .child(div().text_color(self.conn.color(cx)).child(status))
+            .right(refreshed)
+            .children(note.map(|t| div().text_color(cx.theme().muted_foreground).child(t)))
     }
 
-    fn content(&mut self, _cx: &mut Context<Self>) -> bezel::gpui::AnyElement {
-        // No source yet: Connect owns the pane whatever the route points at.
+    fn content(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         if self.source.is_none() && !matches!(self.page, Page::Connect | Page::Settings) {
             return div()
                 .flex()
                 .flex_1()
                 .items_center()
                 .justify_center()
-                .text_color(bezel::theme::ink(0.55))
-                .text_size(px(13.0))
+                .text_color(cx.theme().muted_foreground)
+                .text_sm()
                 .child("no connection configured — pick a mode in Connect")
                 .into_any_element();
         }
@@ -841,20 +645,12 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Cloned so helpers can take &mut cx while holding theme tokens
-        // (Theme::of borrows cx for the whole expression otherwise).
-        let theme = Theme::of(cx).clone();
-        // Hover fades paint once and stick unless frames are requested.
-        if bezel::motion::hover_fades_active() {
-            window.request_animation_frame();
-        }
-
         let viewport = window.viewport_size();
         let narrow = viewport.width < px(COMPACT_BELOW);
         let compact = sidebar_is_compact(self.sidebar_collapsed, narrow);
         let show_range = self.page.uses_range() && self.source.is_some();
 
-        div()
+        h_flex()
             .id("shell")
             .key_context("Shell")
             .track_focus(&self.focus)
@@ -867,8 +663,6 @@ impl Render for Shell {
                 cx.notify();
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                // Only when the shell itself holds focus — digits typed into
-                // a Connect text field must not switch pages.
                 if !this.focus.is_focused(window) {
                     return;
                 }
@@ -894,66 +688,24 @@ impl Render for Shell {
                     }
                 }
             }))
-            .flex()
-            .flex_row()
-            .flex_1()
-            .bg(theme.bg)
-            .text_color(theme.text)
             .size_full()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .child(self.render_sidebar(compact, cx))
             .child(
-                // Sidebar surface; collapses to an icon strip below 900px.
-                div()
-                    .flex()
-                    .flex_col()
-                    .w(px(if compact {
-                        SIDEBAR_W_COMPACT
-                    } else {
-                        SIDEBAR_W
-                    }))
-                    .h_full()
-                    .flex_none()
-                    .p(px(8.0))
-                    .gap(px(8.0))
-                    .border_r_1()
-                    .border_color(theme.border)
-                    .bg(theme.surface)
-                    .child(self.sidebar_toggle(&theme, compact, cx))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_h_0()
-                            .when(compact, |col| col.items_center())
-                            .child(self.host_switcher(&theme, compact, cx))
-                            .child(self.sidebar(&theme, compact, cx))
-                            .child(div().flex_1())
-                            .child(self.settings_nav(&theme, compact, cx))
-                            .pb(px(28.0)),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
+                v_flex()
                     .flex_1()
                     .min_w_0()
                     .child(
-                        div()
-                            .flex()
-                            .flex_row()
+                        h_flex()
                             .items_center()
-                            .px(px(16.0))
-                            .pt(px(12.0))
-                            .pb(px(4.0))
-                            .gap(px(12.0))
-                            .child(
-                                div()
-                                    .text_size(px(15.0))
-                                    .child(SharedString::from(self.page.title())),
-                            )
+                            .px_4()
+                            .pt_3()
+                            .pb_1()
+                            .gap_3()
+                            .child(div().text_lg().child(SharedString::from(self.page.title())))
                             .child(div().flex_1())
-                            .when(show_range, |row| row.child(self.range_bar(&theme, cx))),
+                            .when(show_range, |row| row.child(self.range_bar(cx))),
                     )
                     .child(
                         div()
@@ -962,12 +714,13 @@ impl Render for Shell {
                             .flex_col()
                             .flex_1()
                             .min_h_0()
-                            .p(px(16.0))
+                            .p_4()
                             .overflow_y_scroll()
                             .child(self.content(cx)),
                     )
-                    .child(self.status_bar(&theme)),
+                    .child(self.status_bar(cx)),
             )
+            .children(Root::render_notification_layer(window, cx))
     }
 }
 

@@ -1,8 +1,4 @@
-//! chm-app — GPUI + bezel desktop client for chmonitor.
-//!
-//! AGENT D OWNS shell.rs / main.rs / connect.rs / pages/ wiring.
-//! AGENT E OWNS widgets/ (chart, table, metric card).
-//! AGENT F/G/H fill pages/. Keep all gpui types via `bezel::gpui`.
+//! chm-app — GPUI + gpui-component desktop client for chmonitor.
 
 pub mod config;
 pub mod connect;
