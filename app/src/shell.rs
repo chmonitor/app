@@ -831,7 +831,6 @@ impl Shell {
                     .active(active_page)
                     .suffix({
                         let hotkey = hotkey.clone();
-                        let muted = muted;
                         move |_, _| div().text_xs().text_color(muted).child(hotkey.clone())
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.goto(page, cx))),

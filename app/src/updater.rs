@@ -1,6 +1,9 @@
 //! Download cache path and macOS `.app` install from a release zip.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+#[cfg(target_os = "macos")]
+use std::path::Path;
 
 use chm_update::ReleaseInfo;
 
