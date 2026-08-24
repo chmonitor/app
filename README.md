@@ -46,7 +46,8 @@ CHM_CONFIG=/tmp/chmonitor.toml cargo run -p chm-app
 Named profiles live under `[profiles.<name>]` in `config.toml`; the
 default connection is `[profile]`. `r` refreshes the current page;
 keys `1`–`8` switch sidebar destinations; `cmd-b` toggles the sidebar;
-`cmd-,` opens Settings.
+`cmd-,` opens Settings. The sidebar host switcher lists `[profile]` plus
+`[profiles.<name>]`; Connect's optional Name field saves a named host.
 
 ## Layout
 

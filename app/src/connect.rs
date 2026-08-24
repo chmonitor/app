@@ -15,12 +15,18 @@ use bezel::theme::Theme;
 use bezel::ui::input::TextField;
 use bezel::ui::widgets::{ButtonStyle, Buttons};
 
-use crate::config::{ProfileConfig, load_config, save_config, source_from_profile};
+use crate::config::{
+    DEFAULT_HOST_ID, ProfileConfig, host_id_from_name, load_config, save_config,
+    source_from_profile,
+};
 
 /// Fired after Save successfully writes config.toml.
 #[derive(Debug, Clone)]
 pub enum ConnectEvent {
-    SavedProfile(ProfileConfig),
+    SavedProfile {
+        profile: ProfileConfig,
+        host_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +52,7 @@ pub struct ConnectFlow {
     url: Entity<TextField>,
     user: Entity<TextField>,
     password: Entity<TextField>,
+    name: Entity<TextField>,
     test: TestState,
 }
 
@@ -82,6 +89,7 @@ impl ConnectFlow {
             url: field(initial.url, "http://localhost:8123", cx),
             user: field(initial.user.or(Some("default".into())), "user", cx),
             password: field(initial.password, "password", cx),
+            name: field(None, "work (optional)", cx),
             test: TestState::Idle,
         }
     }
@@ -151,13 +159,18 @@ impl ConnectFlow {
             cx.notify();
             return;
         };
-        // Preserve anything outside [profile] (e.g. [telemetry], [ui]).
+        let host_id = host_id_from_name(&Self::read(&self.name, cx));
         let mut cfg = load_config();
-        cfg.profile = profile.clone();
+        if host_id == DEFAULT_HOST_ID {
+            cfg.profile = profile.clone();
+        } else {
+            cfg.profiles.insert(host_id.clone(), profile.clone());
+        }
+        cfg.ui.host = Some(host_id.clone());
         match save_config(&cfg) {
             Ok(()) => {
                 self.test = TestState::Ok;
-                cx.emit(ConnectEvent::SavedProfile(profile));
+                cx.emit(ConnectEvent::SavedProfile { profile, host_id });
                 cx.notify();
             }
             Err(e) => {
@@ -328,6 +341,7 @@ impl Render for ConnectFlow {
             )
             .child(cloud_fields)
             .child(direct_fields)
+            .child(Self::field_row("Name", &self.name))
             .child(self.status_line(cx))
             .child(
                 div()

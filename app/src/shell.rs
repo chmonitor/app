@@ -20,7 +20,10 @@ use bezel::gpui::{
 use bezel::theme::Theme;
 use bezel::ui::widgets::status_dot;
 
-use crate::config::{ConfigFile, cli, config_path, load_profile, source_from_profile};
+use crate::config::{
+    ConfigFile, Host, ProfileConfig, active_host_id, cli, config_path, list_hosts, load_config,
+    load_profile, profile_for_host, save_config, source_from_profile,
+};
 use crate::connect::{ConnectEvent, ConnectFlow};
 use crate::pages::Page;
 use crate::pages::health::HealthPage;
@@ -75,6 +78,16 @@ impl ConnState {
 #[derive(Debug, Clone)]
 struct UpdateNote(SharedString);
 
+/// Glanceable facts about the active host (status bar).
+#[derive(Debug, Clone, Default)]
+struct HostStatus {
+    version: Option<String>,
+    replicas_ok: u64,
+    replicas_total: u64,
+    health_ok: Option<bool>,
+    fetch_ms: Option<f64>,
+}
+
 /// The root view: owns routing, the active data source and the poll task.
 pub struct Shell {
     focus: FocusHandle,
@@ -96,6 +109,9 @@ pub struct Shell {
     update_note: Option<UpdateNote>,
     /// `None` follows the viewport; `Some` is a click/`cmd-b` override.
     sidebar_collapsed: Option<bool>,
+    active_host: Option<String>,
+    host_menu_open: bool,
+    host_status: HostStatus,
 }
 
 impl Focusable for Shell {
@@ -109,26 +125,31 @@ impl Shell {
     /// * `CHM_SMOKE=1` forces [`MockDataSource`];
     /// * else the saved profile builds a cloud/direct client;
     /// * else no source — Connect becomes the content pane.
-    fn pick_source() -> (Option<Arc<Box<dyn DataSource>>>, ConnState) {
+    #[allow(clippy::type_complexity)]
+    fn pick_source() -> (Option<Arc<Box<dyn DataSource>>>, ConnState, Option<String>) {
         if std::env::var("CHM_SMOKE").is_ok() {
             return (
                 Some(Arc::new(
                     Box::new(MockDataSource::new("mock (CHM_SMOKE)")) as Box<dyn DataSource>
                 )),
                 ConnState::Connected,
+                Some("smoke".into()),
             );
         }
-        match load_profile() {
-            Some(profile) => match source_from_profile(&profile) {
-                Some(src) => (Some(Arc::new(src)), ConnState::Connecting),
-                None => (None, ConnState::Error),
-            },
-            None => (None, ConnState::Error),
+        let cfg = load_config();
+        let id = active_host_id(&cfg);
+        match id
+            .as_deref()
+            .and_then(|id| profile_for_host(&cfg, id))
+            .and_then(|p| source_from_profile(&p))
+        {
+            Some(src) => (Some(Arc::new(src)), ConnState::Connecting, id),
+            None => (None, ConnState::Error, id),
         }
     }
 
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let (source, conn) = Self::pick_source();
+        let (source, conn, active_host) = Self::pick_source();
 
         // Telemetry hook: opt-in only. Recording stays off unless the user
         // explicitly set `[telemetry] enabled = true`; nothing else enables it.
@@ -195,6 +216,9 @@ impl Shell {
             settings: cx.new(|_| SettingsPage::new()),
             update_note: None,
             sidebar_collapsed: None,
+            active_host,
+            host_menu_open: false,
+            host_status: HostStatus::default(),
         };
 
         // Digits 1-8 switch pages; handled in render's on_key_down so it works
@@ -207,13 +231,8 @@ impl Shell {
 
         // Rebuild the source after the Connect screen writes a new profile.
         cx.subscribe(&shell.connect, |this, _, event: &ConnectEvent, cx| {
-            let ConnectEvent::SavedProfile(profile) = event;
-            this.source = source_from_profile(profile).map(Arc::new);
-            this.conn = if this.source.is_some() {
-                ConnState::Connecting
-            } else {
-                ConnState::Error
-            };
+            let ConnectEvent::SavedProfile { profile, host_id } = event;
+            this.apply_host(host_id.clone(), profile.clone());
             this.page = Page::Overview;
             this.refresh_now(cx);
             cx.notify();
@@ -238,6 +257,101 @@ impl Shell {
         let compact = sidebar_is_compact(self.sidebar_collapsed, narrow);
         self.sidebar_collapsed = Some(!compact);
         cx.notify();
+    }
+
+    fn apply_host(&mut self, host_id: String, profile: ProfileConfig) {
+        self.active_host = Some(host_id);
+        self.source = source_from_profile(&profile).map(Arc::new);
+        self.conn = if self.source.is_some() {
+            ConnState::Connecting
+        } else {
+            ConnState::Error
+        };
+        self.host_status = HostStatus::default();
+        self.host_menu_open = false;
+        self.last_error = None;
+    }
+
+    fn switch_host(&mut self, host_id: String, cx: &mut Context<Self>) {
+        if self.active_host.as_deref() == Some(host_id.as_str()) {
+            self.host_menu_open = false;
+            cx.notify();
+            return;
+        }
+        if std::env::var("CHM_SMOKE").is_ok() {
+            self.host_menu_open = false;
+            cx.notify();
+            return;
+        }
+        let cfg = load_config();
+        let Some(profile) = profile_for_host(&cfg, &host_id) else {
+            return;
+        };
+        let mut cfg = load_config();
+        cfg.ui.host = Some(host_id.clone());
+        let _ = save_config(&cfg);
+        self.apply_host(host_id, profile);
+        if matches!(self.page, Page::Connect | Page::Settings) {
+            self.page = Page::Overview;
+        }
+        self.refresh_now(cx);
+        cx.notify();
+    }
+
+    fn hosts(&self) -> Vec<Host> {
+        if std::env::var("CHM_SMOKE").is_ok() {
+            return vec![Host {
+                id: "smoke".into(),
+                label: "smoke".into(),
+                profile: ProfileConfig {
+                    mode: Some("mock".into()),
+                    ..Default::default()
+                },
+            }];
+        }
+        list_hosts(&load_config())
+    }
+
+    fn active_host_label(&self) -> String {
+        let hosts = self.hosts();
+        if let Some(id) = &self.active_host
+            && let Some(h) = hosts.iter().find(|h| &h.id == id)
+        {
+            return h.label.clone();
+        }
+        self.source
+            .as_ref()
+            .map(|s| s.label())
+            .unwrap_or_else(|| "no host".into())
+    }
+
+    fn host_status_text(&self) -> String {
+        match self.conn {
+            ConnState::Connecting => "connecting".into(),
+            ConnState::Error => self.last_error.clone().unwrap_or_else(|| "error".into()),
+            ConnState::Connected => {
+                let mut parts = Vec::new();
+                match self.host_status.health_ok {
+                    Some(false) => parts.push("not ok".into()),
+                    _ => parts.push("ok".into()),
+                }
+                if let Some(v) = &self.host_status.version
+                    && !v.is_empty()
+                {
+                    parts.push(v.clone());
+                }
+                if self.host_status.replicas_total > 0 {
+                    parts.push(format!(
+                        "{}/{} replicas",
+                        self.host_status.replicas_ok, self.host_status.replicas_total
+                    ));
+                }
+                if let Some(ms) = self.host_status.fetch_ms {
+                    parts.push(format!("{ms:.0}ms"));
+                }
+                parts.join(" · ")
+            }
+        }
     }
 
     /// Recurring refresh: each tick re-spawns itself, so a slow fetch can
@@ -286,11 +400,18 @@ impl Shell {
         &mut self,
         outcome: PollOutcome,
         at: chrono::DateTime<chrono::Utc>,
+        fetch_ms: f64,
         cx: &mut Context<Self>,
     ) {
         self.last_refresh = Some(at);
+        self.host_status.fetch_ms = Some(fetch_ms);
         match outcome {
             PollOutcome::Overview { overview, traffic } => {
+                if let Ok(o) = &overview {
+                    self.host_status.version = Some(o.clickhouse_version.clone());
+                    self.host_status.replicas_ok = o.replicas_ok;
+                    self.host_status.replicas_total = o.replicas_total;
+                }
                 self.set_conn(overview.is_ok(), overview.as_ref().err().cloned());
                 self.overview
                     .update(cx, |p, cx| p.set_overview(overview, traffic, cx));
@@ -320,6 +441,9 @@ impl Shell {
                 self.replicas.update(cx, |p, cx| p.set(data, cx));
             }
             PollOutcome::Health(data) => {
+                if let Ok(h) = &data {
+                    self.host_status.health_ok = Some(h.ok);
+                }
                 self.set_conn(data.is_ok(), data.as_ref().err().cloned());
                 self.health.update(cx, |p, cx| p.set(data, cx));
             }
@@ -391,6 +515,111 @@ impl Shell {
                 }),
             )
             .child(label)
+    }
+
+    fn host_switcher(
+        &self,
+        theme: &Theme,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let label = self.active_host_label();
+        let chevron = if self.host_menu_open { "▴" } else { "▾" };
+        let trigger = div()
+            .id("host-switcher")
+            .w_full()
+            .px(px(if compact { 0.0 } else { 12.0 }))
+            .py(px(6.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.element_hover))
+            .when(compact, |el| el.flex().justify_center())
+            .on_click(cx.listener(|this, _: &bezel::gpui::ClickEvent, _, cx| {
+                this.host_menu_open = !this.host_menu_open;
+                cx.notify();
+            }))
+            .child(if compact {
+                div().child(status_dot(self.conn.dot(theme)))
+            } else {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .w_full()
+                    .child(status_dot(self.conn.dot(theme)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.0))
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(theme.text_faint)
+                            .child(chevron),
+                    )
+            });
+
+        let mut col = div().flex().flex_col().gap(px(2.0)).child(trigger);
+        if self.host_menu_open {
+            let active = self.active_host.clone();
+            for host in self.hosts() {
+                let id = host.id.clone();
+                let selected = active.as_deref() == Some(id.as_str());
+                let row_label = host.label.clone();
+                col = col.child(
+                    div()
+                        .id(SharedString::from(format!("host-{id}")))
+                        .w_full()
+                        .px(px(if compact { 0.0 } else { 12.0 }))
+                        .py(px(5.0))
+                        .rounded(px(6.0))
+                        .cursor_pointer()
+                        .when(selected, |el| el.bg(theme.element_active))
+                        .hover(|s| s.bg(theme.element_hover))
+                        .text_size(px(12.0))
+                        .when(compact, |el| el.flex().justify_center())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.switch_host(id.clone(), cx);
+                        }))
+                        .child(if compact {
+                            div()
+                                .text_size(px(10.0))
+                                .child(row_label.chars().next().unwrap_or('·').to_string())
+                        } else {
+                            div().truncate().child(row_label)
+                        }),
+                );
+            }
+            col = col.child(
+                div()
+                    .id("host-add")
+                    .w_full()
+                    .px(px(if compact { 0.0 } else { 12.0 }))
+                    .py(px(5.0))
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.element_hover))
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .when(compact, |el| el.flex().justify_center())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.host_menu_open = false;
+                        this.page = Page::Connect;
+                        cx.notify();
+                    }))
+                    .child(if compact {
+                        SharedString::from("+")
+                    } else {
+                        SharedString::from("+ Add host")
+                    }),
+            );
+        }
+        col
     }
 
     fn sidebar(&self, theme: &Theme, compact: bool, cx: &mut Context<Self>) -> bezel::gpui::Div {
@@ -521,11 +750,13 @@ impl Shell {
     }
 
     fn status_bar(&self, theme: &Theme) -> bezel::gpui::Div {
-        let label = self
-            .source
-            .as_ref()
-            .map(|s| SharedString::from(s.label()))
-            .unwrap_or_else(|| "no source configured".into());
+        let host = SharedString::from(self.active_host_label());
+        let status = SharedString::from(self.host_status_text());
+        let status_color = match self.conn {
+            ConnState::Error => theme.danger,
+            ConnState::Connecting => theme.warning,
+            ConnState::Connected => theme.text_muted,
+        };
         let refreshed = match self.last_refresh {
             Some(at) => format!("updated {}", at.format("%H:%M:%S")),
             None => "not refreshed yet".to_string(),
@@ -535,10 +766,6 @@ impl Shell {
             Some(UpdateNote(t)) if !t.is_empty() => Some(t.clone()),
             Some(_) => None,
         };
-        let err = self
-            .last_error
-            .as_ref()
-            .map(|e| SharedString::from(e.clone()));
 
         div()
             .flex()
@@ -553,10 +780,16 @@ impl Shell {
             .text_size(px(11.5))
             .text_color(theme.text_muted)
             .child(status_dot(self.conn.dot(theme)))
-            .child(div().min_w_0().truncate().child(label))
+            .child(div().min_w_0().truncate().child(host))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_color(status_color)
+                    .child(status),
+            )
             .child(div().child(refreshed))
-            .children(err.map(|e| div().min_w_0().truncate().text_color(theme.danger).child(e)))
-            .child(div().flex_1())
             .children(note.map(|t| div().text_color(theme.text_faint).child(t)))
     }
 
@@ -666,6 +899,7 @@ impl Render for Shell {
                             .flex_1()
                             .min_h_0()
                             .when(compact, |col| col.items_center())
+                            .child(self.host_switcher(&theme, compact, cx))
                             .child(self.sidebar(&theme, compact, cx))
                             .child(div().flex_1())
                             .child(self.settings_nav(&theme, compact, cx))
@@ -784,9 +1018,12 @@ async fn apply_poll(job: PollJob, this: &WeakEntity<Shell>, cx: &mut AsyncApp) {
     };
     // Telemetry hook: fetch latency lands in PerfMetrics whenever the process
     // global exists; recording itself is opt-in via config.toml at startup.
-    let _ = perf().record_fetch(started.elapsed().as_secs_f64() * 1000.0);
+    let fetch_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let _ = perf().record_fetch(fetch_ms);
     let at = chrono::Utc::now();
-    let _ = this.update(cx, |shell, cx| shell.apply_outcome(outcome, at, cx));
+    let _ = this.update(cx, |shell, cx| {
+        shell.apply_outcome(outcome, at, fetch_ms, cx)
+    });
 }
 
 /// Compact (icon strip) when the user collapsed it, otherwise when the
@@ -794,10 +1031,6 @@ async fn apply_poll(job: PollJob, this: &WeakEntity<Shell>, cx: &mut AsyncApp) {
 fn sidebar_is_compact(user: Option<bool>, narrow: bool) -> bool {
     user.unwrap_or(narrow)
 }
-
-// Re-export so existing `crate::shell::ProfileConfig` paths keep compiling
-// if any leftover call sites remain.
-pub use crate::config::ProfileConfig;
 
 #[cfg(test)]
 mod tests {

@@ -43,11 +43,15 @@ pub struct TelemetrySection {
     pub enabled: bool,
 }
 
-/// `[ui]` table — appearance preference (`system` / `light` / `dark`).
+/// `[ui]` table — appearance preference (`system` / `light` / `dark`)
+/// and the selected host id (`default` or a `[profiles.*]` key).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct UiSection {
     #[serde(default)]
     pub appearance: Option<String>,
+    /// Active host: `"default"` for `[profile]`, or a `[profiles.<id>]` key.
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 /// Whole `config.toml`.
@@ -126,6 +130,122 @@ pub fn load_profile_from(path: &Path, named: Option<&str>) -> Option<ProfileConf
             Some(cfg.profile)
         }
     }
+}
+
+/// Id used for the unnamed `[profile]` host in the switcher.
+pub const DEFAULT_HOST_ID: &str = "default";
+
+/// One saved connection, for the host switcher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Host {
+    pub id: String,
+    pub label: String,
+    pub profile: ProfileConfig,
+}
+
+/// Hostname (or fallback) shown in the switcher.
+pub fn host_display(p: &ProfileConfig) -> String {
+    match p.mode.as_deref() {
+        Some("cloud") => host_from_url(p.base_url.as_deref()).unwrap_or_else(|| "cloud".into()),
+        Some("clickhouse") => {
+            host_from_url(p.url.as_deref()).unwrap_or_else(|| "clickhouse".into())
+        }
+        _ => "host".into(),
+    }
+}
+
+pub fn host_label(id: &str, p: &ProfileConfig) -> String {
+    if id != DEFAULT_HOST_ID {
+        return id.to_string();
+    }
+    host_display(p)
+}
+
+/// Best-effort host[:port] from an HTTP(S) URL. `None` when empty/unusable.
+pub fn host_from_url(raw: Option<&str>) -> Option<String> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let rest = raw.split_once("://").map(|(_, r)| r).unwrap_or(raw);
+    let hostport = rest.split('/').next().unwrap_or(rest);
+    let host = hostport.split('@').next_back()?.split('?').next()?;
+    let host = host.trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+/// Turn a Connect "Name" field into a host id. Empty/`default` → `[profile]`.
+pub fn host_id_from_name(name: &str) -> String {
+    let cleaned: String = name
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() || cleaned == DEFAULT_HOST_ID {
+        DEFAULT_HOST_ID.into()
+    } else {
+        cleaned
+    }
+}
+
+/// `[profile]` first, then named `[profiles.*]` in key order.
+pub fn list_hosts(cfg: &ConfigFile) -> Vec<Host> {
+    let mut out = Vec::new();
+    if cfg.profile.mode.is_some() {
+        out.push(Host {
+            id: DEFAULT_HOST_ID.into(),
+            label: host_label(DEFAULT_HOST_ID, &cfg.profile),
+            profile: cfg.profile.clone(),
+        });
+    }
+    for (id, p) in &cfg.profiles {
+        if p.mode.is_none() || id.is_empty() || id == DEFAULT_HOST_ID {
+            continue;
+        }
+        out.push(Host {
+            id: id.clone(),
+            label: host_label(id, p),
+            profile: p.clone(),
+        });
+    }
+    out
+}
+
+pub fn profile_for_host(cfg: &ConfigFile, id: &str) -> Option<ProfileConfig> {
+    list_hosts(cfg)
+        .into_iter()
+        .find(|h| h.id == id)
+        .map(|h| h.profile)
+}
+
+/// Env `CHM_PROFILE`, then `[ui].host`, then the first listed host.
+pub fn active_host_id(cfg: &ConfigFile) -> Option<String> {
+    let hosts = list_hosts(cfg);
+    if hosts.is_empty() {
+        return None;
+    }
+    let listed = |id: &str| hosts.iter().any(|h| h.id == id);
+    if let Some(name) = profile_name_from_env()
+        && listed(&name)
+    {
+        return Some(name);
+    }
+    if let Some(name) = cfg.ui.host.as_deref()
+        && listed(name)
+    {
+        return Some(name.to_string());
+    }
+    Some(hosts[0].id.clone())
 }
 
 /// Build the boxed data source behind [`chm_core::DataSource`] for a saved
@@ -352,5 +472,56 @@ user = "alice"
         assert_eq!(back.ui.appearance.as_deref(), Some("light"));
         assert_eq!(back.profile.channel.as_deref(), Some("beta"));
         assert!(back.telemetry.enabled);
+    }
+
+    #[test]
+    fn host_from_url_strips_scheme_and_path() {
+        assert_eq!(
+            host_from_url(Some("https://acme.dash.chmonitor.dev/api")),
+            Some("acme.dash.chmonitor.dev".into())
+        );
+        assert_eq!(
+            host_from_url(Some("http://localhost:8123")),
+            Some("localhost:8123".into())
+        );
+        assert_eq!(host_from_url(Some("  ")), None);
+        assert_eq!(host_from_url(None), None);
+    }
+
+    #[test]
+    fn host_id_from_name_cleans_and_reserves_default() {
+        assert_eq!(host_id_from_name(""), DEFAULT_HOST_ID);
+        assert_eq!(host_id_from_name("default"), DEFAULT_HOST_ID);
+        assert_eq!(host_id_from_name(" prod / eu "), "prod---eu");
+        assert_eq!(host_id_from_name("work"), "work");
+    }
+
+    #[test]
+    fn list_hosts_and_active_id() {
+        let mut cfg = ConfigFile::default();
+        cfg.profile.mode = Some("cloud".into());
+        cfg.profile.base_url = Some("https://acme.dash.chmonitor.dev".into());
+        cfg.profiles.insert(
+            "work".into(),
+            ProfileConfig {
+                mode: Some("clickhouse".into()),
+                url: Some("http://localhost:8123".into()),
+                ..Default::default()
+            },
+        );
+        let hosts = list_hosts(&cfg);
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].id, DEFAULT_HOST_ID);
+        assert_eq!(hosts[0].label, "acme.dash.chmonitor.dev");
+        assert_eq!(hosts[1].id, "work");
+        assert_eq!(active_host_id(&cfg).as_deref(), Some(DEFAULT_HOST_ID));
+        cfg.ui.host = Some("work".into());
+        assert_eq!(active_host_id(&cfg).as_deref(), Some("work"));
+        cfg.ui.host = Some("missing".into());
+        assert_eq!(active_host_id(&cfg).as_deref(), Some(DEFAULT_HOST_ID));
+        assert_eq!(
+            profile_for_host(&cfg, "work").unwrap().url.as_deref(),
+            Some("http://localhost:8123")
+        );
     }
 }
