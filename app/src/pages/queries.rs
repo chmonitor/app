@@ -144,7 +144,7 @@ impl Render for QueriesPage {
             if let Some(err) = &self.error {
                 return status(format!("queries unavailable: {err}"), cx).into_any_element();
             }
-            return status("loading queries…", cx).into_any_element();
+            return crate::widgets::skeleton::table_block(cx).into_any_element();
         }
         let mut col = div().flex().flex_col().gap(px(16.)).w_full();
         if let Some(err) = &self.error {

@@ -12,6 +12,8 @@ chrono.workspace = true
 reqwest.workspace = true
 tracing.workspace = true
 chm-update.workspace = true
+sha2 = "0.10"
+dirs.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

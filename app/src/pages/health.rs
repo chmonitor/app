@@ -45,7 +45,7 @@ impl Render for HealthPage {
             return status(format!("health unavailable: {err}"), cx).into_any_element();
         }
         let Some(h) = &self.data else {
-            return status("loading health…", cx).into_any_element();
+            return crate::widgets::skeleton::metric_grid(cx).into_any_element();
         };
         let pool_pct = format!(
             "{:.0}%",

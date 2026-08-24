@@ -56,7 +56,7 @@ impl Render for OverviewPage {
             return status(format!("overview unavailable: {err}"), cx).into_any_element();
         }
         let Some(o) = &self.data else {
-            return status("loading overview…", cx).into_any_element();
+            return crate::widgets::skeleton::metric_grid(cx).into_any_element();
         };
 
         let used_pct = 100.0 * o.disk_used_bytes as f64 / o.disk_total_bytes.max(1) as f64;

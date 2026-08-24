@@ -44,7 +44,7 @@ impl Render for TablesPage {
             return status(format!("tables unavailable: {err}"), cx).into_any_element();
         }
         let Some(rows) = &self.data else {
-            return status("loading tables…", cx).into_any_element();
+            return crate::widgets::skeleton::table_block(cx).into_any_element();
         };
         if rows.is_empty() {
             return status("no tables", cx).into_any_element();

@@ -49,7 +49,9 @@ CHM_CONFIG=/tmp/chmonitor.toml cargo run -p chm-app
 Named profiles live under `[profiles.<name>]` in `config.toml`; the
 default connection is `[profile]`. `r` refreshes the current page;
 keys `1`–`8` switch sidebar destinations; `cmd-b` toggles the sidebar;
-`cmd-,` opens Settings. The sidebar host switcher lists `[profile]` plus
+`cmd-,` opens Settings; the sun/moon control in the title bar toggles
+light/dark. Pages restore from a local cache so they paint immediately,
+then refresh; skeletons show when nothing is cached yet. The sidebar host switcher lists `[profile]` plus
 `[profiles.<name>]`; Connect's optional Name field saves a named host.
 
 ## Layout
@@ -61,7 +63,7 @@ keys `1`–`8` switch sidebar destinations; `cmd-b` toggles the sidebar;
 | `crates/chm-clickhouse` | mode 2: direct ClickHouse HTTP client |
 | `crates/chm-postgres` | mode 3: direct Postgres (`pg_stat_*`) |
 | `crates/chm-update` | channel-aware update checker (stable/beta) |
-| `crates/chm-telemetry` | opt-in telemetry + perf metrics |
+| `crates/chm-telemetry` | opt-in install ping + page events, local fetch/RSS metrics |
 | `app/` | GPUI UI: [gpui-base](https://longbridge.github.io/gpui-component/base/getting-started.md) primitives (buttons, radios, tables) + [gpui-component](https://longbridge.github.io/gpui-component/) for sidebar, charts, theme |
 | `.github/workflows/` | CI: lint, test, build matrix, releases |
 

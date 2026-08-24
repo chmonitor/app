@@ -63,7 +63,7 @@ impl Render for TrafficPage {
             return status(format!("traffic unavailable: {err}"), cx).into_any_element();
         }
         let Some(t) = &self.data else {
-            return status("loading traffic…", cx).into_any_element();
+            return crate::widgets::skeleton::chart_block(cx).into_any_element();
         };
         if t.queries_per_sec.is_empty()
             && t.rows_read_per_sec.is_empty()

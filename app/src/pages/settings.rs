@@ -242,12 +242,14 @@ impl Render for SettingsPage {
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(div().text_sm().child("Local timings"))
+                            .child(div().text_sm().child("Anonymous usage"))
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("fetch timings only; no query text (off by default)"),
+                                    .child(
+                                        "install ping + page views to telemetry.chmonitor.dev; no SQL or hostnames",
+                                    ),
                             ),
                     )
                     .child(theme_switch("telemetry", telemetry, cx).on_change(
@@ -292,6 +294,7 @@ pub fn apply_appearance(mode: Appearance, window: &mut Window, cx: &mut App) {
         Appearance::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
         Appearance::System => Theme::sync_system_appearance(Some(window), cx),
     }
+    crate::theme::apply_brand(cx);
 }
 
 pub fn appearance_from_cfg(s: Option<&str>) -> Appearance {
@@ -302,7 +305,7 @@ pub fn appearance_from_cfg(s: Option<&str>) -> Appearance {
     }
 }
 
-fn appearance_to_cfg(mode: Appearance) -> &'static str {
+pub(crate) fn appearance_to_cfg(mode: Appearance) -> &'static str {
     match mode {
         Appearance::System => "system",
         Appearance::Light => "light",

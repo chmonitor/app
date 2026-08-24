@@ -44,7 +44,7 @@ impl Render for MergesPage {
             return status(format!("merges unavailable: {err}"), cx).into_any_element();
         }
         let Some(rows) = &self.data else {
-            return status("loading merges…", cx).into_any_element();
+            return crate::widgets::skeleton::table_block(cx).into_any_element();
         };
         if rows.is_empty() {
             return status("no merges or mutations in flight", cx).into_any_element();

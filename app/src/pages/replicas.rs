@@ -44,7 +44,7 @@ impl Render for ReplicasPage {
             return status(format!("replicas unavailable: {err}"), cx).into_any_element();
         }
         let Some(rows) = &self.data else {
-            return status("loading replicas…", cx).into_any_element();
+            return crate::widgets::skeleton::table_block(cx).into_any_element();
         };
         if rows.is_empty() {
             return status("no replicas", cx).into_any_element();

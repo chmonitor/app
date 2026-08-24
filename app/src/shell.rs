@@ -14,7 +14,9 @@ use gpui::{
     KeyDownEvent, Render, SharedString, WeakEntity, Window, actions, div, prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _, IconName, Root, h_flex,
+    ActiveTheme as _, Icon, IconName, Root, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
     sidebar::{
         Sidebar, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem,
         SidebarToggleButton,
@@ -23,6 +25,7 @@ use gpui_component::{
     v_flex,
 };
 
+use crate::cache;
 use crate::config::{
     ConfigFile, Host, ProfileConfig, active_host_id, cli, config_path, list_hosts, load_config,
     load_profile, profile_for_host, save_config, source_from_profile,
@@ -102,6 +105,7 @@ struct HostStatus {
     replicas_total: u64,
     health_ok: Option<bool>,
     fetch_ms: Option<f64>,
+    rss_bytes: Option<u64>,
 }
 
 /// The root view: owns routing, the active data source and the poll task.
@@ -127,6 +131,7 @@ pub struct Shell {
     sidebar_collapsed: Option<bool>,
     active_host: Option<String>,
     host_status: HostStatus,
+    fetching: bool,
 }
 
 impl Focusable for Shell {
@@ -174,9 +179,21 @@ impl Shell {
             .map(|cfg| cfg.telemetry.enabled)
             .unwrap_or(false);
         if telemetry_enabled {
-            // Config built but nothing transmitted: PerfMetrics only records
-            // local latency numbers, and recording itself stays gated here.
-            let _cfg = chm_telemetry::TelemetryConfig::default().set_enabled(true);
+            let channel = match load_profile().and_then(|p| p.channel).as_deref() {
+                Some("beta") => chm_update::Channel::Beta,
+                _ => chm_update::Channel::Stable,
+            };
+            let cfg = chm_telemetry::TelemetryConfig::opt_in(
+                chm_telemetry::TELEMETRY_PING_URL,
+                env!("CARGO_PKG_VERSION"),
+                channel,
+            );
+            cx.spawn(async move |_, _| {
+                let http = chm_telemetry::http_client();
+                let _ = chm_core::tokio_block_on(chm_telemetry::ping(http, &cfg));
+                let _ = chm_core::tokio_block_on(chm_telemetry::track(http, &cfg, "app_loaded"));
+            })
+            .detach();
         }
 
         let update_cfg = load_config().update;
@@ -216,6 +233,7 @@ impl Shell {
             sidebar_collapsed: None,
             active_host,
             host_status: HostStatus::default(),
+            fetching: false,
         };
 
         // Digits 1-8 switch pages; handled in render's on_key_down so it works
@@ -237,7 +255,7 @@ impl Shell {
         .detach();
 
         shell.start_poll(cx);
-        shell.refresh_now(cx);
+        shell.refresh(false, cx);
         shell
     }
 
@@ -246,8 +264,30 @@ impl Shell {
             return;
         }
         self.page = page;
-        self.refresh_now(cx);
+        self.emit_page(page);
+        self.refresh(false, cx);
         cx.notify();
+    }
+
+    fn emit_page(&self, page: Page) {
+        if !load_config().telemetry.enabled {
+            return;
+        }
+        let event = match page {
+            Page::Health => "health_viewed",
+            Page::Queries => "queries_viewed",
+            Page::Overview => "app_loaded",
+            _ => return,
+        };
+        let cfg = chm_telemetry::TelemetryConfig::opt_in(
+            chm_telemetry::TELEMETRY_PING_URL,
+            env!("CARGO_PKG_VERSION"),
+            chm_update::Channel::Stable,
+        );
+        std::thread::spawn(move || {
+            let http = chm_telemetry::http_client();
+            let _ = chm_core::tokio_block_on(chm_telemetry::track(http, &cfg, event));
+        });
     }
 
     fn toggle_sidebar(&mut self, narrow: bool, cx: &mut Context<Self>) {
@@ -391,12 +431,108 @@ impl Shell {
 
     /// Manual refresh action + initial fill.
     fn refresh_now(&mut self, cx: &mut Context<Self>) {
+        self.refresh(true, cx);
+    }
+
+    fn refresh(&mut self, force: bool, cx: &mut Context<Self>) {
+        self.hydrate_cache(cx);
+        if !force && self.cache_is_fresh() {
+            self.fetching = false;
+            cx.notify();
+            return;
+        }
         let Some(job) = self.poll_job() else { return };
-        if self.conn != ConnState::Error {
+        if self.conn != ConnState::Error && !self.has_cached_page() {
             self.conn = ConnState::Connecting;
         }
+        self.fetching = true;
+        cx.notify();
         cx.spawn(async move |this, cx| apply_poll(job, &this, cx).await)
             .detach();
+    }
+
+    fn cache_host(&self) -> Option<&str> {
+        self.active_host.as_deref()
+    }
+
+    fn cache_is_fresh(&self) -> bool {
+        let Some(host) = self.cache_host() else {
+            return false;
+        };
+        cache::load(host, self.page, self.range)
+            .map(|(_, t)| cache::is_fresh(t))
+            .unwrap_or(false)
+    }
+
+    fn has_cached_page(&self) -> bool {
+        let Some(host) = self.cache_host() else {
+            return false;
+        };
+        cache::load(host, self.page, self.range).is_some()
+    }
+
+    fn hydrate_cache(&mut self, cx: &mut Context<Self>) {
+        let Some(host) = self.active_host.clone() else {
+            return;
+        };
+        let Some((data, _)) = cache::load(&host, self.page, self.range) else {
+            return;
+        };
+        self.apply_cached(data, cx);
+        if self.conn != ConnState::Error {
+            self.conn = ConnState::Connected;
+        }
+    }
+
+    fn apply_cached(&mut self, data: crate::cache::CachedPage, cx: &mut Context<Self>) {
+        use crate::cache::CachedPage;
+        match data {
+            CachedPage::Overview { overview, traffic } => {
+                self.host_status.version = Some(overview.clickhouse_version.clone());
+                self.host_status.replicas_ok = overview.replicas_ok;
+                self.host_status.replicas_total = overview.replicas_total;
+                self.overview
+                    .update(cx, |p, cx| p.set_overview(Ok(overview), Ok(traffic), cx));
+            }
+            CachedPage::Queries {
+                running,
+                slow,
+                failed,
+            } => {
+                self.queries
+                    .update(cx, |p, cx| p.set(Ok(running), Ok(slow), Ok(failed), cx));
+            }
+            CachedPage::Merges(rows) => {
+                self.merges.update(cx, |p, cx| p.set(Ok(rows), cx));
+            }
+            CachedPage::Replicas(rows) => {
+                self.replicas.update(cx, |p, cx| p.set(Ok(rows), cx));
+            }
+            CachedPage::Health(h) => {
+                self.host_status.health_ok = Some(h.ok);
+                self.health.update(cx, |p, cx| p.set(Ok(h), cx));
+            }
+            CachedPage::Tables(rows) => {
+                self.tables.update(cx, |p, cx| p.set(Ok(rows), cx));
+            }
+            CachedPage::Traffic(t) => {
+                self.traffic.update(cx, |p, cx| p.set(Ok(t), cx));
+            }
+        }
+    }
+
+    fn toggle_dark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::pages::settings::{Appearance, appearance_to_cfg, apply_appearance};
+        let next = if crate::theme::current_mode(cx) == gpui_component::ThemeMode::Dark {
+            Appearance::Light
+        } else {
+            Appearance::Dark
+        };
+        apply_appearance(next, window, cx);
+        let mut cfg = load_config();
+        cfg.ui.appearance = Some(appearance_to_cfg(next).into());
+        let _ = save_config(&cfg);
+        cx.notify();
     }
 
     fn apply_outcome(
@@ -407,7 +543,16 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.last_refresh = Some(at);
+        self.fetching = false;
         self.host_status.fetch_ms = Some(fetch_ms);
+        if let Some(rss) = chm_telemetry::rss_bytes() {
+            self.host_status.rss_bytes = Some(rss);
+            perf().record_rss(rss);
+        }
+        let _ = perf().record_fetch(fetch_ms);
+        if let Some(host) = self.active_host.clone() {
+            self.persist_cache(&host, &outcome);
+        }
         match outcome {
             PollOutcome::Overview { overview, traffic } => {
                 if let Ok(o) = &overview {
@@ -460,6 +605,42 @@ impl Shell {
             }
         }
         cx.notify();
+    }
+
+    fn persist_cache(&self, host: &str, outcome: &PollOutcome) {
+        use crate::cache::CachedPage;
+        let page = match outcome {
+            PollOutcome::Overview { overview, traffic } => {
+                let (Ok(o), Ok(t)) = (overview, traffic) else {
+                    return;
+                };
+                CachedPage::Overview {
+                    overview: o.clone(),
+                    traffic: t.clone(),
+                }
+            }
+            PollOutcome::Queries {
+                running,
+                slow,
+                failed,
+            } => {
+                let (Ok(r), Ok(s), Ok(f)) = (running, slow, failed) else {
+                    return;
+                };
+                CachedPage::Queries {
+                    running: r.clone(),
+                    slow: s.clone(),
+                    failed: f.clone(),
+                }
+            }
+            PollOutcome::Merges(Ok(rows)) => CachedPage::Merges(rows.clone()),
+            PollOutcome::Replicas(Ok(rows)) => CachedPage::Replicas(rows.clone()),
+            PollOutcome::Health(Ok(h)) => CachedPage::Health(h.clone()),
+            PollOutcome::Tables(Ok(rows)) => CachedPage::Tables(rows.clone()),
+            PollOutcome::Traffic(Ok(t)) => CachedPage::Traffic(t.clone()),
+            _ => return,
+        };
+        crate::cache::save(host, self.page, self.range, &page);
     }
 
     fn set_conn(&mut self, ok: bool, err: Option<String>) {
@@ -739,7 +920,16 @@ impl Shell {
                     .child(host),
             )
             .child(div().text_color(self.conn.color(cx)).child(status))
-            .right(refreshed)
+            .right({
+                let mut bits = vec![refreshed];
+                if let Some(ms) = self.host_status.fetch_ms {
+                    bits.push(format!("{ms:.0}ms"));
+                }
+                if let Some(rss) = self.host_status.rss_bytes {
+                    bits.push(crate::widgets::geometry::format_bytes(rss));
+                }
+                bits.join(" · ")
+            })
             .children(update_el)
     }
 
@@ -830,8 +1020,32 @@ impl Render for Shell {
                             .pb_1()
                             .gap_3()
                             .child(div().text_lg().child(SharedString::from(self.page.title())))
+                            .when(self.fetching, |row| {
+                                row.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("refreshing"),
+                                )
+                            })
                             .child(div().flex_1())
-                            .when(show_range, |row| row.child(self.range_bar(cx))),
+                            .when(show_range, |row| row.child(self.range_bar(cx)))
+                            .child({
+                                let dark = crate::theme::current_mode(cx)
+                                    == gpui_component::ThemeMode::Dark;
+                                Button::new("theme-toggle")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(if dark {
+                                        Icon::new(IconName::Sun)
+                                    } else {
+                                        Icon::new(IconName::Moon)
+                                    })
+                                    .tooltip(if dark { "Light mode" } else { "Dark mode" })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_dark(window, cx);
+                                    }))
+                            }),
                     )
                     .child(
                         div()
