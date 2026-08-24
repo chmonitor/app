@@ -5,12 +5,12 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _,
-    button::{Button, ButtonVariants as _},
-    h_flex,
+    ActiveTheme as _, h_flex,
     input::{Input, InputState},
     v_flex,
 };
+
+use crate::widgets::controls::{choice_radio, ghost_button, primary_button, radio_group};
 
 use crate::config::{
     DEFAULT_HOST_ID, ProfileConfig, host_id_from_name, load_config, save_config,
@@ -243,48 +243,18 @@ impl ConnectFlow {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected = self.mode == mode;
-        div()
-            .id(SharedString::from(format!("mode-{label}")))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(10.))
-            .px(px(12.))
-            .py(px(10.))
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(if selected {
-                cx.theme().primary
-            } else {
-                cx.theme().border
-            })
-            .bg(if selected {
-                cx.theme().accent
-            } else {
-                cx.theme().background
-            })
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.mode = mode;
-                this.test = TestState::Idle;
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .size(px(14.))
-                    .rounded_full()
-                    .border_1()
-                    .border_color(cx.theme().primary)
-                    .when(selected, |dot| dot.bg(cx.theme().primary)),
-            )
-            .child(
-                v_flex().gap_1().child(div().text_sm().child(label)).child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(hint),
-                ),
-            )
+        let entity = cx.entity().downgrade();
+        choice_radio(format!("mode-{label}"), selected, label, hint, cx).on_change(
+            move |next, _, _, cx| {
+                if next {
+                    let _ = entity.update(cx, |this, cx| {
+                        this.mode = mode;
+                        this.test = TestState::Idle;
+                        cx.notify();
+                    });
+                }
+            },
+        )
     }
 
     fn field_row(label: &'static str, field: &Entity<InputState>) -> impl IntoElement {
@@ -344,8 +314,7 @@ impl Render for ConnectFlow {
                     ),
             )
             .child(
-                v_flex()
-                    .gap_2()
+                radio_group("connect-mode")
                     .child(self.mode_row(
                         "Cloud",
                         "chmonitor-hosted dashboard API · base URL + API key",
@@ -368,21 +337,21 @@ impl Render for ConnectFlow {
             .child(fields)
             .child(Self::field_row("Name", &self.name))
             .child(self.status_line(cx))
-            .child(
+            .child({
+                let entity = cx.entity().downgrade();
                 h_flex()
                     .gap_2()
+                    .child(ghost_button("test", "Test", cx).on_click({
+                        let entity = entity.clone();
+                        move |_, _, cx| {
+                            let _ = entity.update(cx, |this, cx| this.run_test(cx));
+                        }
+                    }))
                     .child(
-                        Button::new("test")
-                            .ghost()
-                            .label("Test")
-                            .on_click(cx.listener(|this, _, _, cx| this.run_test(cx))),
+                        primary_button("save", "Save", cx).on_click(move |_, _, cx| {
+                            let _ = entity.update(cx, |this, cx| this.save(cx));
+                        }),
                     )
-                    .child(
-                        Button::new("save")
-                            .primary()
-                            .label("Save")
-                            .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-                    ),
-            )
+            })
     }
 }

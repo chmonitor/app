@@ -1,6 +1,6 @@
 # chmonitor Desktop
 
-GPUI + [gpui-component](https://longbridge.github.io/gpui-component/) desktop client for [chmonitor](https://chmonitor.dev) — ClickHouse
+GPUI desktop client for [chmonitor](https://chmonitor.dev) — ClickHouse
 monitoring for macOS and Linux, with two connection modes:
 
 1. **Cloud / dashboard endpoint** — talks to `dash.chmonitor.dev` or any
@@ -61,7 +61,7 @@ keys `1`–`8` switch sidebar destinations; `cmd-b` toggles the sidebar;
 | `crates/chm-postgres` | mode 3: direct Postgres (`pg_stat_*`) |
 | `crates/chm-update` | channel-aware update checker (stable/beta) |
 | `crates/chm-telemetry` | opt-in telemetry + perf metrics |
-| `app/` | GPUI + gpui-component UI |
+| `app/` | GPUI UI: [gpui-base](https://longbridge.github.io/gpui-component/base/getting-started.md) primitives (buttons, radios, tables) + [gpui-component](https://longbridge.github.io/gpui-component/) for sidebar, charts, theme |
 | `.github/workflows/` | CI: lint, test, build matrix, releases |
 
 ## Testing

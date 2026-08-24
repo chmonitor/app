@@ -4,14 +4,11 @@
 
 use chm_update::Channel;
 use gpui::{App, Context, Render, Window, div, prelude::*, px};
-use gpui_component::{
-    ActiveTheme as _, Theme, ThemeMode,
-    radio::{Radio, RadioGroup},
-    v_flex,
-};
+use gpui_component::{ActiveTheme as _, Theme, ThemeMode, h_flex, v_flex};
 
 use crate::config::{config_path, load_config, save_config};
 use crate::pages::heading;
+use crate::widgets::controls::{choice_radio, radio_group, theme_switch};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Appearance {
@@ -22,14 +19,6 @@ pub enum Appearance {
 
 impl Appearance {
     const ALL: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
-
-    fn index(self) -> usize {
-        Self::ALL.iter().position(|&m| m == self).unwrap_or(0)
-    }
-
-    fn from_index(i: usize) -> Self {
-        Self::ALL.get(i).copied().unwrap_or(Appearance::System)
-    }
 
     fn label(self) -> &'static str {
         match self {
@@ -113,76 +102,94 @@ impl Render for SettingsPage {
             .gap_5()
             .max_w(px(520.))
             .child(heading("Appearance"))
-            .child(
-                RadioGroup::vertical("appearance")
-                    .children(Appearance::ALL.iter().map(|&mode| {
-                        Radio::new(mode.label()).label(mode.label()).child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(mode.hint()),
-                        )
-                    }))
-                    .selected_index(Some(appearance.index()))
-                    .on_click(cx.listener(|this, index: &usize, window, cx| {
-                        this.set_appearance(Appearance::from_index(*index), window, cx);
-                    })),
-            )
-            .child(heading("Updates"))
-            .child(
-                RadioGroup::vertical("channel")
-                    .child(
-                        Radio::new("stable").label("Stable").child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("tagged releases"),
-                        ),
-                    )
-                    .child(
-                        Radio::new("beta").label("Beta").child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("pre-release builds"),
-                        ),
-                    )
-                    .selected_index(Some(if channel == Channel::Stable { 0 } else { 1 }))
-                    .on_click(cx.listener(|this, index: &usize, _, cx| {
-                        this.set_channel(
-                            if *index == 0 {
-                                Channel::Stable
-                            } else {
-                                Channel::Beta
-                            },
+            .child({
+                let entity = cx.entity().downgrade();
+                let mut group = radio_group("appearance");
+                for &mode in &Appearance::ALL {
+                    let entity = entity.clone();
+                    group = group.child(
+                        choice_radio(
+                            format!("app-{}", appearance_to_cfg(mode)),
+                            appearance == mode,
+                            mode.label(),
+                            mode.hint(),
                             cx,
-                        );
-                    })),
-            )
+                        )
+                        .on_change(move |next, _, window, cx| {
+                            if next {
+                                let _ = entity.update(cx, |this, cx| {
+                                    this.set_appearance(mode, window, cx);
+                                });
+                            }
+                        }),
+                    );
+                }
+                group
+            })
+            .child(heading("Updates"))
+            .child({
+                let entity = cx.entity().downgrade();
+                radio_group("channel")
+                    .child(
+                        choice_radio(
+                            "ch-stable",
+                            channel == Channel::Stable,
+                            "Stable",
+                            "tagged releases",
+                            cx,
+                        )
+                        .on_change({
+                            let entity = entity.clone();
+                            move |next, _, _, cx| {
+                                if next {
+                                    let _ = entity.update(cx, |this, cx| {
+                                        this.set_channel(Channel::Stable, cx);
+                                    });
+                                }
+                            }
+                        }),
+                    )
+                    .child(
+                        choice_radio(
+                            "ch-beta",
+                            channel == Channel::Beta,
+                            "Beta",
+                            "pre-release builds",
+                            cx,
+                        )
+                        .on_change(move |next, _, _, cx| {
+                            if next {
+                                let _ = entity.update(cx, |this, cx| {
+                                    this.set_channel(Channel::Beta, cx);
+                                });
+                            }
+                        }),
+                    )
+            })
             .child(heading("Telemetry"))
-            .child(
-                RadioGroup::vertical("telemetry")
+            .child({
+                let entity = cx.entity().downgrade();
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
                     .child(
-                        Radio::new("off").label("Off").child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("nothing is recorded or sent (default)"),
-                        ),
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_sm().child("Local timings"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("fetch timings only; no query text (off by default)"),
+                            ),
                     )
-                    .child(
-                        Radio::new("on").label("On").child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("local fetch timings only; no query text"),
-                        ),
-                    )
-                    .selected_index(Some(if telemetry { 1 } else { 0 }))
-                    .on_click(cx.listener(|this, index: &usize, _, cx| {
-                        this.set_telemetry(*index == 1, cx);
-                    })),
-            )
+                    .child(theme_switch("telemetry", telemetry, cx).on_change(
+                        move |next, _, _, cx| {
+                            let _ = entity.update(cx, |this, cx| this.set_telemetry(next, cx));
+                        },
+                    ))
+            })
             .child(heading("Shortcuts"))
             .child(
                 v_flex()

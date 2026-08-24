@@ -14,9 +14,7 @@ use gpui::{
     KeyDownEvent, Render, SharedString, WeakEntity, Window, actions, div, prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _, IconName, Root, Sizable as _,
-    button::{Button, ButtonVariants as _},
-    h_flex,
+    ActiveTheme as _, IconName, Root, h_flex,
     sidebar::{
         Sidebar, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem,
         SidebarToggleButton,
@@ -572,24 +570,32 @@ impl Shell {
     }
 
     fn range_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
-            .items_center()
-            .gap_1()
-            .children(TimeRange::ALL.into_iter().map(|range| {
-                let active = self.range == range;
-                Button::new(SharedString::from(format!("range-{}", range.label())))
-                    .xsmall()
-                    .when(active, |b| b.primary())
-                    .when(!active, |b| b.ghost())
-                    .label(range.label())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.range != range {
-                            this.range = range;
-                            this.refresh_now(cx);
-                            cx.notify();
-                        }
-                    }))
-            }))
+        let entity = cx.entity().downgrade();
+        let mut group = crate::widgets::controls::range_group("time-range");
+        for range in TimeRange::ALL {
+            let entity = entity.clone();
+            let pressed = self.range == range;
+            group = group.child(
+                crate::widgets::controls::range_toggle(
+                    format!("range-{}", range.label()),
+                    pressed,
+                    range.label(),
+                    cx,
+                )
+                .on_change(move |next, _, _, cx| {
+                    if next {
+                        let _ = entity.update(cx, |this, cx| {
+                            if this.range != range {
+                                this.range = range;
+                                this.refresh_now(cx);
+                                cx.notify();
+                            }
+                        });
+                    }
+                }),
+            );
+        }
+        group
     }
 
     fn status_bar(&self, cx: &Context<Self>) -> impl IntoElement {

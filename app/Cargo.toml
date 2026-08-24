@@ -13,6 +13,7 @@ chm-update.workspace = true
 chm-telemetry.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
+gpui-base.workspace = true
 gpui-component.workspace = true
 gpui-component-assets.workspace = true
 anyhow.workspace = true

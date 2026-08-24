@@ -38,6 +38,10 @@ fn main() {
     gpui_platform::application()
         .with_assets(gpui_component_assets::Assets)
         .run(|cx: &mut App| {
+            // gpui_component::init includes gpui_base::init (theme tokens,
+            // scrollbars, focus). Application-owned controls are gpui-base
+            // primitives styled from the theme; charts/sidebar stay on the
+            // styled façade.
             gpui_component::init(cx);
             cx.bind_keys([
                 KeyBinding::new("cmd-,", OpenSettings, None),

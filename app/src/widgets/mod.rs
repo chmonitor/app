@@ -3,6 +3,7 @@
 
 pub mod cards;
 pub mod chart;
+pub mod controls;
 pub mod geometry;
 pub mod table;
 

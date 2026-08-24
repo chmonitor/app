@@ -122,8 +122,10 @@ fn section(
         None => status("loading…", cx).into_any_element(),
         Some(rows) if rows.is_empty() => status("none", cx).into_any_element(),
         Some(rows) => data_table(
+            format!("queries-{title}"),
             query_columns(with_exception),
             query_rows(rows, with_exception),
+            cx,
         )
         .into_any_element(),
     };

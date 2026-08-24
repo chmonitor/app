@@ -97,6 +97,6 @@ impl Render for MergesPage {
                 ]
             })
             .collect();
-        data_table(columns, body).into_any_element()
+        data_table("merges", columns, body, cx).into_any_element()
     }
 }
