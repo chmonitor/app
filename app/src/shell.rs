@@ -31,7 +31,7 @@ use crate::pages::replicas::ReplicasPage;
 use crate::pages::tables::TablesPage;
 use crate::pages::traffic::TrafficPage;
 
-actions!(chm_shell, [Refresh]);
+actions!(chm_shell, [Refresh, ToggleSidebar]);
 
 /// Seconds between automatic background refreshes.
 const POLL_SECS: u64 = 30;
@@ -92,6 +92,8 @@ pub struct Shell {
     traffic: Entity<TrafficPage>,
     connect: Entity<ConnectFlow>,
     update_note: Option<UpdateNote>,
+    /// `None` follows the viewport; `Some` is a click/`cmd-b` override.
+    sidebar_collapsed: Option<bool>,
 }
 
 impl Focusable for Shell {
@@ -189,11 +191,15 @@ impl Shell {
             traffic: cx.new(|_| TrafficPage::new()),
             connect: cx.new(|cx| ConnectFlow::new(load_profile(), cx)),
             update_note: None,
+            sidebar_collapsed: None,
         };
 
         // Digits 1-8 switch pages; handled in render's on_key_down so it works
         // wherever focus sits in this view's subtree. `r` is an action.
-        cx.bind_keys([KeyBinding::new("r", Refresh, None)]);
+        cx.bind_keys([
+            KeyBinding::new("r", Refresh, None),
+            KeyBinding::new("cmd-b", ToggleSidebar, None),
+        ]);
 
         // Rebuild the source after the Connect screen writes a new profile.
         cx.subscribe(&shell.connect, |this, _, event: &ConnectEvent, cx| {
@@ -221,6 +227,12 @@ impl Shell {
         }
         self.page = page;
         self.refresh_now(cx);
+        cx.notify();
+    }
+
+    fn toggle_sidebar(&mut self, narrow: bool, cx: &mut Context<Self>) {
+        let compact = sidebar_is_compact(self.sidebar_collapsed, narrow);
+        self.sidebar_collapsed = Some(!compact);
         cx.notify();
     }
 
@@ -330,6 +342,52 @@ impl Shell {
     }
 
     // -- rendering ----------------------------------------------------------
+
+    fn sidebar_toggle(
+        &self,
+        theme: &Theme,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl bezel::gpui::IntoElement {
+        let glyph = if compact { "›" } else { "‹" };
+        let label = if compact {
+            div().child(SharedString::from(glyph))
+        } else {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .w_full()
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child("Sidebar"),
+                )
+                .child(
+                    div()
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(glyph)),
+                )
+        };
+        div()
+            .id("sidebar-toggle")
+            .w_full()
+            .px(px(if compact { 0.0 } else { 12.0 }))
+            .py(px(6.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.element_hover))
+            .text_size(px(13.0))
+            .when(compact, |el| el.flex().justify_center())
+            .on_click(
+                cx.listener(|this, _: &bezel::gpui::ClickEvent, window, cx| {
+                    this.toggle_sidebar(window.viewport_size().width < px(COMPACT_BELOW), cx);
+                }),
+            )
+            .child(label)
+    }
 
     fn sidebar(&self, theme: &Theme, compact: bool, cx: &mut Context<Self>) -> bezel::gpui::Div {
         let items: Vec<bezel::gpui::AnyElement> = Page::ALL
@@ -491,7 +549,8 @@ impl Render for Shell {
         }
 
         let viewport = window.viewport_size();
-        let compact = viewport.width < px(COMPACT_BELOW);
+        let narrow = viewport.width < px(COMPACT_BELOW);
+        let compact = sidebar_is_compact(self.sidebar_collapsed, narrow);
         let show_range = self.page.uses_range() && self.source.is_some();
 
         div()
@@ -499,6 +558,9 @@ impl Render for Shell {
             .key_context("Shell")
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &Refresh, _, cx| this.refresh_now(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
+                this.toggle_sidebar(window.viewport_size().width < px(COMPACT_BELOW), cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 // Only when the shell itself holds focus — digits typed into
                 // a Connect text field must not switch pages.
@@ -543,6 +605,7 @@ impl Render for Shell {
                     .border_r_1()
                     .border_color(theme.border)
                     .bg(theme.surface)
+                    .child(self.sidebar_toggle(&theme, compact, cx))
                     .child(self.sidebar(&theme, compact, cx)),
             )
             .child(
@@ -662,6 +725,27 @@ async fn apply_poll(job: PollJob, this: &WeakEntity<Shell>, cx: &mut AsyncApp) {
     let _ = this.update(cx, |shell, cx| shell.apply_outcome(outcome, at, cx));
 }
 
+/// Compact (icon strip) when the user collapsed it, otherwise when the
+/// window is narrower than [`COMPACT_BELOW`].
+fn sidebar_is_compact(user: Option<bool>, narrow: bool) -> bool {
+    user.unwrap_or(narrow)
+}
+
 // Re-export so existing `crate::shell::ProfileConfig` paths keep compiling
 // if any leftover call sites remain.
 pub use crate::config::ProfileConfig;
+
+#[cfg(test)]
+mod tests {
+    use super::sidebar_is_compact;
+
+    #[test]
+    fn sidebar_follows_viewport_until_toggled() {
+        assert!(!sidebar_is_compact(None, false));
+        assert!(sidebar_is_compact(None, true));
+        assert!(sidebar_is_compact(Some(true), false));
+        assert!(!sidebar_is_compact(Some(false), true));
+        assert!(sidebar_is_compact(Some(true), true));
+        assert!(!sidebar_is_compact(Some(false), false));
+    }
+}
