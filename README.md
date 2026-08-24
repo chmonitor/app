@@ -15,6 +15,7 @@ monitoring for macOS and Linux, with two connection modes:
 ```sh
 cargo build -p chm-app            # debug
 cargo build --release -p chm-app  # release (LTO, stripped)
+scripts/build-macos.sh            # dist/macos/chmonitor.app (icon + Info.plist)
 ```
 
 ### macOS
@@ -84,6 +85,8 @@ are rejected by the release pipeline.
 - `stable` — tagged releases via release-please.
 - `beta` — pre-release builds (tag suffix `-beta.N`); the in-app update
   checker follows the channel baked into the profile.
-- Auto-update: in-app check + download prompt (chm-update); update manifests
-  are emitted per release and attached alongside signed archives.
+- Auto-update: `[update]` in `config.toml` (check on launch by default;
+  `auto_download` fetches the archive). The status bar shows the version and
+  installs over `chmonitor.app` when you are running from the bundle.
+  Manifests are `{base}/{channel}.json` (`CHM_UPDATE_URL` overrides the host).
 

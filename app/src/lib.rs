@@ -8,4 +8,5 @@ pub mod config;
 pub mod connect;
 pub mod pages;
 pub mod shell;
+pub mod updater;
 pub mod widgets;

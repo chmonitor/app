@@ -37,6 +37,8 @@ use crate::pages::replicas::ReplicasPage;
 use crate::pages::settings::SettingsPage;
 use crate::pages::tables::TablesPage;
 use crate::pages::traffic::TrafficPage;
+use crate::updater;
+use crate::widgets::controls::ghost_button;
 
 actions!(chm_shell, [Refresh, ToggleSidebar, OpenSettings]);
 
@@ -76,9 +78,21 @@ impl ConnState {
     }
 }
 
-/// Result of the one-shot startup update check.
+/// Result of the one-shot startup update check / download.
 #[derive(Debug, Clone)]
-struct UpdateNote(SharedString);
+enum UpdateUi {
+    Disabled,
+    Checking,
+    Idle,
+    Silent,
+    Available(chm_update::ReleaseInfo),
+    Downloading(String),
+    Ready {
+        version: String,
+        archive: std::path::PathBuf,
+    },
+    Failed(String),
+}
 
 /// Glanceable facts about the active host (status bar).
 #[derive(Debug, Clone, Default)]
@@ -108,7 +122,7 @@ pub struct Shell {
     traffic: Entity<TrafficPage>,
     connect: Entity<ConnectFlow>,
     settings: Entity<SettingsPage>,
-    update_note: Option<UpdateNote>,
+    update: UpdateUi,
     /// `None` follows the viewport; `Some` is a click/`cmd-b` override.
     sidebar_collapsed: Option<bool>,
     active_host: Option<String>,
@@ -165,31 +179,10 @@ impl Shell {
             let _cfg = chm_telemetry::TelemetryConfig::default().set_enabled(true);
         }
 
-        // One-shot update check, background thread. Failures are silent unless
-        // CHM_UPDATE_URL overrides the manifest base (chm_update semantics).
-        let channel = match load_profile().and_then(|p| p.channel).as_deref() {
-            Some("beta") => chm_update::Channel::Beta,
-            _ => chm_update::Channel::Stable,
-        };
-        cx.spawn(async move |this, cx| {
-            let checker = chm_update::UpdateChecker::production();
-            let current = semver::Version::parse(env!("CARGO_PKG_VERSION"))
-                .unwrap_or_else(|_| semver::Version::new(0, 1, 1));
-            let note = match chm_core::tokio_block_on(checker.check(channel, &current)) {
-                Ok(Some(release)) => {
-                    UpdateNote(format!("update available: v{}", release.version()).into())
-                }
-                Ok(None) => UpdateNote("up to date".into()),
-                // Keep the status bar from sitting on "update check…" forever
-                // when the manifest host is unreachable.
-                Err(_) => UpdateNote(SharedString::default()),
-            };
-            let _ = this.update(cx, |shell, cx| {
-                shell.update_note = Some(note);
-                cx.notify();
-            });
-        })
-        .detach();
+        let update_cfg = load_config().update;
+        if update_cfg.enabled {
+            Self::spawn_update_check(update_cfg.auto_download, cx);
+        }
 
         let force_connect = cli().connect;
         let page = if force_connect || source.is_none() {
@@ -215,7 +208,11 @@ impl Shell {
             traffic: cx.new(|_| TrafficPage::new()),
             connect: cx.new(|cx| ConnectFlow::new(load_profile(), window, cx)),
             settings: cx.new(|_| SettingsPage::new()),
-            update_note: None,
+            update: if load_config().update.enabled {
+                UpdateUi::Checking
+            } else {
+                UpdateUi::Disabled
+            },
             sidebar_collapsed: None,
             active_host,
             host_status: HostStatus::default(),
@@ -475,6 +472,90 @@ impl Shell {
         }
     }
 
+    fn spawn_update_check(auto_download: bool, cx: &mut Context<Self>) {
+        let channel = match load_profile().and_then(|p| p.channel).as_deref() {
+            Some("beta") => chm_update::Channel::Beta,
+            _ => chm_update::Channel::Stable,
+        };
+        cx.spawn(async move |this, cx| {
+            let checker = chm_update::UpdateChecker::production();
+            let current = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+                .unwrap_or_else(|_| semver::Version::new(0, 1, 1));
+            let found = chm_core::tokio_block_on(checker.check(channel, &current));
+            let _ = this.update(cx, |shell, cx| {
+                match found {
+                    Ok(Some(release)) => {
+                        shell.update = UpdateUi::Available(release.clone());
+                        if auto_download {
+                            shell.start_download(release, cx);
+                        }
+                    }
+                    Ok(None) => shell.update = UpdateUi::Idle,
+                    Err(_) => shell.update = UpdateUi::Silent,
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn start_download(&mut self, release: chm_update::ReleaseInfo, cx: &mut Context<Self>) {
+        let Some(dest) = updater::archive_path(&release) else {
+            self.update = UpdateUi::Failed("no cache directory".into());
+            cx.notify();
+            return;
+        };
+        self.update = UpdateUi::Downloading(release.version().to_string());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let checker = chm_update::UpdateChecker::production();
+            let result = chm_core::tokio_block_on(checker.download(&release, &dest));
+            let _ = this.update(cx, |shell, cx| {
+                shell.update = match result {
+                    Ok(()) => UpdateUi::Ready {
+                        version: release.version().to_string(),
+                        archive: dest,
+                    },
+                    Err(e) => UpdateUi::Failed(e.to_string()),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_downloaded(&mut self, cx: &mut Context<Self>) {
+        let UpdateUi::Ready { archive, .. } = &self.update else {
+            return;
+        };
+        let archive = archive.clone();
+        #[cfg(target_os = "macos")]
+        {
+            match updater::install_macos_zip(&archive) {
+                Ok(app) => {
+                    updater::relaunch(&app);
+                    cx.quit();
+                }
+                Err(_) => {
+                    let _ = std::process::Command::new("/usr/bin/open")
+                        .args(["-R"])
+                        .arg(&archive)
+                        .spawn();
+                    self.update = UpdateUi::Failed(
+                        "saved the archive — drop it over /Applications/chmonitor.app".into(),
+                    );
+                    cx.notify();
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = archive;
+            self.update = UpdateUi::Failed("install the archive from the release page".into());
+            cx.notify();
+        }
+    }
+
     fn host_icon(mode: Option<&str>) -> IconName {
         match mode {
             Some("postgres") => IconName::HardDrive,
@@ -605,10 +686,49 @@ impl Shell {
             Some(at) => format!("updated {}", at.format("%H:%M:%S")),
             None => "not refreshed yet".to_string(),
         };
-        let note = match &self.update_note {
-            None => Some(SharedString::from("update check…")),
-            Some(UpdateNote(t)) if !t.is_empty() => Some(t.clone()),
-            Some(_) => None,
+        let muted = cx.theme().muted_foreground;
+        let update_el = match &self.update {
+            UpdateUi::Disabled | UpdateUi::Silent => None,
+            UpdateUi::Checking => Some(
+                div()
+                    .text_color(muted)
+                    .child("update check…")
+                    .into_any_element(),
+            ),
+            UpdateUi::Idle => Some(
+                div()
+                    .text_color(muted)
+                    .child("up to date")
+                    .into_any_element(),
+            ),
+            UpdateUi::Available(release) => {
+                let release = release.clone();
+                let label = format!("update v{}", release.version());
+                Some(
+                    ghost_button("apply-update", label, cx)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.start_download(release.clone(), cx);
+                        }))
+                        .into_any_element(),
+                )
+            }
+            UpdateUi::Downloading(v) => Some(
+                div()
+                    .text_color(muted)
+                    .child(format!("downloading v{v}…"))
+                    .into_any_element(),
+            ),
+            UpdateUi::Ready { version, .. } => Some(
+                ghost_button("install-update", format!("install v{version}"), cx)
+                    .on_click(cx.listener(|this, _, _, cx| this.apply_downloaded(cx)))
+                    .into_any_element(),
+            ),
+            UpdateUi::Failed(e) => Some(
+                div()
+                    .text_color(cx.theme().danger)
+                    .child(e.clone())
+                    .into_any_element(),
+            ),
         };
         StatusBar::new()
             .left(
@@ -620,7 +740,7 @@ impl Shell {
             )
             .child(div().text_color(self.conn.color(cx)).child(status))
             .right(refreshed)
-            .children(note.map(|t| div().text_color(cx.theme().muted_foreground).child(t)))
+            .children(update_el)
     }
 
     fn content(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {

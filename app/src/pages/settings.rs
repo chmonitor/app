@@ -41,6 +41,8 @@ pub struct SettingsPage {
     appearance: Appearance,
     channel: Channel,
     telemetry: bool,
+    update_enabled: bool,
+    auto_download: bool,
     status: Option<String>,
 }
 
@@ -57,6 +59,8 @@ impl SettingsPage {
             appearance: appearance_from_cfg(cfg.ui.appearance.as_deref()),
             channel: channel_from_cfg(cfg.profile.channel.as_deref()),
             telemetry: cfg.telemetry.enabled,
+            update_enabled: cfg.update.enabled,
+            auto_download: cfg.update.auto_download,
             status: None,
         }
     }
@@ -66,6 +70,8 @@ impl SettingsPage {
         cfg.ui.appearance = Some(appearance_to_cfg(self.appearance).into());
         cfg.profile.channel = Some(self.channel.as_str().into());
         cfg.telemetry.enabled = self.telemetry;
+        cfg.update.enabled = self.update_enabled;
+        cfg.update.auto_download = self.auto_download;
         self.status = save_config(&cfg).err();
     }
 
@@ -87,6 +93,18 @@ impl SettingsPage {
         self.persist();
         cx.notify();
     }
+
+    fn set_update_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.update_enabled = enabled;
+        self.persist();
+        cx.notify();
+    }
+
+    fn set_auto_download(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.auto_download = enabled;
+        self.persist();
+        cx.notify();
+    }
 }
 
 impl Render for SettingsPage {
@@ -97,6 +115,8 @@ impl Render for SettingsPage {
         let appearance = self.appearance;
         let channel = self.channel;
         let telemetry = self.telemetry;
+        let update_enabled = self.update_enabled;
+        let auto_download = self.auto_download;
 
         v_flex()
             .gap_5()
@@ -127,6 +147,52 @@ impl Render for SettingsPage {
                 group
             })
             .child(heading("Updates"))
+            .child({
+                let entity = cx.entity().downgrade();
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_sm().child("Check on launch"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("fetch the channel manifest from updates.chmonitor.dev"),
+                            ),
+                    )
+                    .child(theme_switch("upd-enabled", update_enabled, cx).on_change(
+                        move |next, _, _, cx| {
+                            let _ = entity.update(cx, |this, cx| this.set_update_enabled(next, cx));
+                        },
+                    ))
+            })
+            .child({
+                let entity = cx.entity().downgrade();
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_sm().child("Download automatically"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("save the archive when a newer build is found"),
+                            ),
+                    )
+                    .child(theme_switch("upd-auto", auto_download, cx).on_change(
+                        move |next, _, _, cx| {
+                            let _ = entity.update(cx, |this, cx| this.set_auto_download(next, cx));
+                        },
+                    ))
+            })
             .child({
                 let entity = cx.entity().downgrade();
                 radio_group("channel")

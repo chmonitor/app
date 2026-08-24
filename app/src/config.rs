@@ -61,6 +61,33 @@ pub struct UiSection {
     pub host: Option<String>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+/// `[update]` table — launch check and optional auto-download.
+///
+/// Channel still lives on `[profile].channel` (`stable` / `beta`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct UpdateSection {
+    /// Check for a newer build on launch. Default true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Download the archive when a newer build is found. Default false
+    /// (status bar shows the version; click to fetch/install).
+    #[serde(default)]
+    pub auto_download: bool,
+}
+
+impl Default for UpdateSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_download: false,
+        }
+    }
+}
+
 /// Whole `config.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ConfigFile {
@@ -73,6 +100,8 @@ pub struct ConfigFile {
     pub telemetry: TelemetrySection,
     #[serde(default)]
     pub ui: UiSection,
+    #[serde(default)]
+    pub update: UpdateSection,
 }
 
 /// `<config_dir>/chmonitor/config.toml`, or `CHM_CONFIG` when set.
@@ -313,6 +342,11 @@ Environment:
   CHM_PROFILE=<name>    Load [profiles.<name>] from config.toml
   CHM_CONFIG=<path>     Override config.toml path
   CHM_UPDATE_URL=<url>  Override update manifest base
+
+Config (`config.toml`):
+  [update]
+  enabled = true          # check on launch (default)
+  auto_download = false   # fetch the archive without a click
 ";
 
 impl Cli {
@@ -497,11 +531,26 @@ user = "alice"
         cfg.ui.appearance = Some("light".into());
         cfg.profile.channel = Some("beta".into());
         cfg.telemetry.enabled = true;
+        cfg.update.auto_download = true;
         save_config_to(&path, &cfg).unwrap();
         let back = load_config_from(&path);
         assert_eq!(back.ui.appearance.as_deref(), Some("light"));
         assert_eq!(back.profile.channel.as_deref(), Some("beta"));
         assert!(back.telemetry.enabled);
+        assert!(back.update.enabled);
+        assert!(back.update.auto_download);
+    }
+
+    #[test]
+    fn update_section_defaults_to_enabled() {
+        let cfg: ConfigFile = toml::from_str("").unwrap();
+        assert!(cfg.update.enabled);
+        assert!(!cfg.update.auto_download);
+        let cfg: ConfigFile = toml::from_str("[update]\nauto_download = true\n").unwrap();
+        assert!(cfg.update.enabled);
+        assert!(cfg.update.auto_download);
+        let cfg: ConfigFile = toml::from_str("[update]\nenabled = false\n").unwrap();
+        assert!(!cfg.update.enabled);
     }
 
     #[test]
