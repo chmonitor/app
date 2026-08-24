@@ -12,13 +12,14 @@ use chm_core::{
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
     KeyBinding, KeyDownEvent, MouseButton, Render, SharedString, WeakEntity, Window, actions, div,
-    prelude::*, px,
+    prelude::*, px, relative,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Root, Sizable as _, TitleBar,
     button::{Button, ButtonVariants as _},
-    h_flex,
+    h_flex, h_resizable,
     menu::{DropdownMenu as _, PopupMenuItem},
+    resizable_panel,
     sidebar::{
         Sidebar, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem,
         SidebarToggleButton,
@@ -54,6 +55,18 @@ const POLL_SECS: u64 = 30;
 const COMPACT_BELOW: f32 = 900.0;
 /// Sidebar width expanded / collapsed.
 const SIDEBAR_W: f32 = 176.0;
+const SIDEBAR_W_MIN: f32 = 140.0;
+const SIDEBAR_W_MAX: f32 = 360.0;
+
+fn clamp_sidebar_width(width: f32) -> f32 {
+    width.clamp(SIDEBAR_W_MIN, SIDEBAR_W_MAX)
+}
+
+fn sidebar_width_from_cfg(width: Option<u32>) -> f32 {
+    width
+        .map(|w| clamp_sidebar_width(w as f32))
+        .unwrap_or(SIDEBAR_W)
+}
 
 /// Perf metrics live for the whole process; recording is gated by
 /// `[telemetry] enabled=true` in config.toml (never on by default).
@@ -132,6 +145,8 @@ pub struct Shell {
     update: UpdateUi,
     /// `None` follows the viewport; `Some` is a click/`cmd-b` override.
     sidebar_collapsed: Option<bool>,
+    /// Expanded sidebar width in px (drag-handle, persisted as `[ui].sidebar_width`).
+    sidebar_width: f32,
     active_host: Option<String>,
     host_status: HostStatus,
     fetching: bool,
@@ -238,6 +253,7 @@ impl Shell {
             } else {
                 None
             },
+            sidebar_width: sidebar_width_from_cfg(load_config().ui.sidebar_width),
             active_host,
             host_status: HostStatus::default(),
             fetching: false,
@@ -300,6 +316,18 @@ impl Shell {
     fn toggle_sidebar(&mut self, narrow: bool, cx: &mut Context<Self>) {
         let compact = sidebar_is_compact(self.sidebar_collapsed, narrow);
         self.sidebar_collapsed = Some(!compact);
+        cx.notify();
+    }
+
+    fn set_sidebar_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        let width = clamp_sidebar_width(width);
+        if (self.sidebar_width - width).abs() < 0.5 {
+            return;
+        }
+        self.sidebar_width = width;
+        let mut cfg = load_config();
+        cfg.ui.sidebar_width = Some(width.round() as u32);
+        let _ = save_config(&cfg);
         cx.notify();
     }
 
@@ -805,7 +833,8 @@ impl Shell {
         Sidebar::new("nav")
             .collapsed(compact)
             .collapsible(true)
-            .w(px(SIDEBAR_W))
+            .when(compact, |sb| sb.w(px(self.sidebar_width)))
+            .when(!compact, |sb| sb.w(relative(1.)))
             .header(
                 SidebarHeader::new().child(
                     h_flex().w_full().items_center().justify_between().child(
@@ -1083,6 +1112,52 @@ impl Render for Shell {
         let show_range = self.page.uses_range() && self.source.is_some();
 
         let pad = crate::density::Density::current().content_pad();
+        let content = div()
+            .id("content-scroll")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .p(px(pad))
+            .overflow_y_scroll()
+            .child(self.content(cx));
+        let split = if compact {
+            h_flex()
+                .flex_1()
+                .min_h_0()
+                .child(self.render_sidebar(true, cx))
+                .child(content)
+                .into_any_element()
+        } else {
+            let entity = cx.entity().downgrade();
+            div()
+                .flex_1()
+                .min_h_0()
+                .h_full()
+                .child(
+                    h_resizable("shell-split")
+                        .on_resize(move |state, _, cx| {
+                            let width = state
+                                .read(cx)
+                                .sizes()
+                                .first()
+                                .copied()
+                                .map(f32::from)
+                                .unwrap_or(SIDEBAR_W);
+                            let _ =
+                                entity.update(cx, |this, cx| this.set_sidebar_width(width, cx));
+                        })
+                        .child(
+                            resizable_panel()
+                                .size(px(self.sidebar_width))
+                                .size_range(px(SIDEBAR_W_MIN)..px(SIDEBAR_W_MAX))
+                                .child(self.render_sidebar(false, cx)),
+                        )
+                        .child(resizable_panel().child(content)),
+                )
+                .into_any_element()
+        };
         v_flex()
             .id("shell")
             .key_context("Shell")
@@ -1125,24 +1200,7 @@ impl Render for Shell {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(self.render_title_bar(show_range, cx))
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.render_sidebar(compact, cx))
-                    .child(
-                        div()
-                            .id("content-scroll")
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .p(px(pad))
-                            .overflow_y_scroll()
-                            .child(self.content(cx)),
-                    ),
-            )
+            .child(split)
             .child(self.status_bar(cx))
             .children(Root::render_notification_layer(window, cx))
     }
@@ -1237,7 +1295,7 @@ fn sidebar_is_compact(user: Option<bool>, narrow: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::sidebar_is_compact;
+    use super::{SIDEBAR_W, clamp_sidebar_width, sidebar_is_compact, sidebar_width_from_cfg};
 
     #[test]
     fn sidebar_follows_viewport_until_toggled() {
@@ -1247,5 +1305,15 @@ mod tests {
         assert!(!sidebar_is_compact(Some(false), true));
         assert!(sidebar_is_compact(Some(true), true));
         assert!(!sidebar_is_compact(Some(false), false));
+    }
+
+    #[test]
+    fn sidebar_width_clamps_and_defaults() {
+        assert_eq!(clamp_sidebar_width(80.0), 140.0);
+        assert_eq!(clamp_sidebar_width(500.0), 360.0);
+        assert_eq!(clamp_sidebar_width(200.0), 200.0);
+        assert_eq!(sidebar_width_from_cfg(None), SIDEBAR_W);
+        assert_eq!(sidebar_width_from_cfg(Some(220)), 220.0);
+        assert_eq!(sidebar_width_from_cfg(Some(10)), 140.0);
     }
 }

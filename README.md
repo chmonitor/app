@@ -49,6 +49,7 @@ CHM_CONFIG=/tmp/chmonitor.toml cargo run -p chm-app
 Named profiles live under `[profiles.<name>]` in `config.toml`; the
 default connection is `[profile]`. `r` refreshes the current page;
 keys `1`–`8` switch sidebar destinations; `cmd-b` toggles the sidebar;
+drag the sidebar edge to resize it (saved in `[ui].sidebar_width`);
 `cmd-,` opens Settings. The native title bar holds the host switcher,
 time range, light/dark, and Settings. Overview defaults to the four
 [dash.chmonitor.dev](https://dash.chmonitor.dev) KPI cards (active queries,

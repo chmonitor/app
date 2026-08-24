@@ -71,6 +71,9 @@ pub struct UiSection {
     /// Start with the sidebar collapsed to an icon strip. Default false.
     #[serde(default)]
     pub compact_sidebar: bool,
+    /// Expanded sidebar width in pixels. Missing uses the app default.
+    #[serde(default)]
+    pub sidebar_width: Option<u32>,
     /// Show fetch latency and RSS in the status bar. Default true.
     #[serde(default = "default_true")]
     pub show_perf: bool,
@@ -85,6 +88,7 @@ impl Default for UiSection {
             overview_metrics: Vec::new(),
             show_chart: true,
             compact_sidebar: false,
+            sidebar_width: None,
             show_perf: true,
         }
     }
@@ -585,6 +589,7 @@ user = "alice"
         assert!(cfg.ui.show_chart);
         assert!(cfg.ui.show_perf);
         assert!(!cfg.ui.compact_sidebar);
+        assert!(cfg.ui.sidebar_width.is_none());
         assert!(cfg.ui.overview_metrics.is_empty());
         assert!(cfg.ui.density.is_none());
         let cfg: ConfigFile = toml::from_str(
@@ -595,6 +600,7 @@ overview_metrics = ["qps", "disk"]
 show_chart = false
 compact_sidebar = true
 show_perf = false
+sidebar_width = 220
 "#,
         )
         .unwrap();
@@ -602,6 +608,7 @@ show_perf = false
         assert_eq!(cfg.ui.overview_metrics, vec!["qps", "disk"]);
         assert!(!cfg.ui.show_chart);
         assert!(cfg.ui.compact_sidebar);
+        assert_eq!(cfg.ui.sidebar_width, Some(220));
         assert!(!cfg.ui.show_perf);
     }
 
