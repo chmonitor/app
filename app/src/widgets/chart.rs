@@ -5,7 +5,7 @@
 use super::geometry::{Bounds, format_count, nice_scale, points_to_px};
 use bezel::gpui::{
     App, Bounds as GBounds, Font, FontFeatures, FontWeight, Hsla, IntoElement, PathBuilder, Pixels,
-    TextAlign, TextRun, Window, canvas, div, fill, font, point, prelude::*, px, size,
+    TextAlign, TextRun, Window, canvas, div, font, point, prelude::*, px,
 };
 use bezel::theme::{Theme, current_appearance, hairline};
 use chm_core::SeriesPoint;
@@ -24,9 +24,9 @@ struct ChartLayout {
     plot: Bounds,
 }
 
-const PAD_LEFT: f64 = 46.0;
+const PAD_LEFT: f64 = 64.0;
 const PAD_RIGHT: f64 = 12.0;
-const PAD_TOP: f64 = 30.0;
+const PAD_TOP: f64 = 22.0;
 const PAD_BOTTOM: f64 = 22.0;
 const MIN_PLOT_W: f64 = 40.0;
 const MIN_PLOT_H: f64 = 40.0;
@@ -71,8 +71,7 @@ pub fn line_chart(title: &str, unit: &str, series: Vec<NamedSeries>) -> impl Int
         .gap(px(8.0))
         .child(title_el)
         .child(unit_el);
-    let plot_bg_color = t.surface;
-    let grid_color = hairline(0.07);
+    let grid_color = hairline(0.14);
     let axis_text_color = t.text_muted;
     let line_color_muted = t.text_muted;
     let line_color_accent = t.accent;
@@ -109,14 +108,6 @@ pub fn line_chart(title: &str, unit: &str, series: Vec<NamedSeries>) -> impl Int
                 let origin = bounds.origin;
                 let plot = layout.plot;
 
-                window.paint_quad(fill(
-                    GBounds::<Pixels> {
-                        origin: origin + point(px(plot.x as f32), px(plot.y as f32)),
-                        size: size(px(plot.w as f32), px(plot.h as f32)),
-                    },
-                    plot_bg_color,
-                ));
-
                 let all_values: Vec<f64> = series
                     .iter()
                     .flat_map(|s| s.points.iter().map(|p| p.v))
@@ -141,21 +132,30 @@ pub fn line_chart(title: &str, unit: &str, series: Vec<NamedSeries>) -> impl Int
 
                 let (y_min, y_max, y_ticks) = nice_scale(data_min, data_max, 4);
                 let y_span = if y_max > y_min { y_max - y_min } else { 1.0 };
+                // A 1px fill-quad per tick reads as a ruled-notebook texture on
+                // Metal (especially with runtime shaders); stroke a handful of
+                // grid lines instead, and cap labels so they cannot overlap.
+                let tick_step = y_ticks.len().div_ceil(5).max(1);
 
-                for tick in &y_ticks {
+                for (i, tick) in y_ticks.iter().enumerate() {
+                    if i % tick_step != 0 && i + 1 != y_ticks.len() {
+                        continue;
+                    }
                     let frac = (tick - y_min) / y_span;
                     let y = plot.y + plot.h - frac * plot.h;
                     if y < plot.y - 0.5 || y > plot.y + plot.h + 0.5 {
                         continue;
                     }
                     let y = y.clamp(plot.y, plot.y + plot.h);
-                    window.paint_quad(fill(
-                        GBounds::<Pixels> {
-                            origin: origin + point(px(plot.x as f32), px(y as f32 - 0.5)),
-                            size: size(px(plot.w as f32), px(1.0)),
-                        },
-                        grid_color,
+                    let mut grid = PathBuilder::stroke(px(1.0));
+                    grid.move_to(point(origin.x + px(plot.x as f32), origin.y + px(y as f32)));
+                    grid.line_to(point(
+                        origin.x + px((plot.x + plot.w) as f32),
+                        origin.y + px(y as f32),
                     ));
+                    if let Ok(path) = grid.build() {
+                        window.paint_path(path, grid_color);
+                    }
                     let label = tick_label(*tick);
                     let label_len = label.len();
                     let shaped = window
@@ -179,12 +179,12 @@ pub fn line_chart(title: &str, unit: &str, series: Vec<NamedSeries>) -> impl Int
                         && let Some(line) = lines.first_mut()
                     {
                         let line_w = line.unwrapped_layout.width;
-                        let lx = origin.x + px(plot.x as f32) - line_w - px(6.0);
-                        let ly = origin.y + px(y as f32) - px(AXIS_FONT_SIZE * 0.62);
+                        let lx = origin.x + px(plot.x as f32) - line_w - px(8.0);
+                        let ly = origin.y + px(y as f32) - px(AXIS_FONT_SIZE * 0.55);
                         let _ = line.paint(
                             point(lx, ly),
-                            px(AXIS_FONT_SIZE * 1.25),
-                            TextAlign::Right,
+                            px(AXIS_FONT_SIZE * 1.4),
+                            TextAlign::Left,
                             None,
                             window,
                             _cx,

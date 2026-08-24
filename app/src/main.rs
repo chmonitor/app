@@ -13,11 +13,28 @@ use bezel::gpui::{
 };
 use bezel::theme;
 use bezel::ui;
+use chm_app::config::{Cli, CliError};
 use chm_app::shell::Shell;
 
 actions!(chm_app, [Quit]);
 
 fn main() {
+    match Cli::parse(std::env::args().skip(1)) {
+        Ok(cli) => chm_app::config::install_cli(cli),
+        Err(CliError::Help) => {
+            print!("{}", chm_app::config::HELP);
+            return;
+        }
+        Err(CliError::Version) => {
+            println!("chm-app {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Err(CliError::Unknown(arg)) => {
+            eprintln!("unknown argument: {arg}\n{}", chm_app::config::HELP);
+            std::process::exit(2);
+        }
+    }
+
     // Smoke gate: prove init runs to completion headless before any window is
     // opened. CHM_SMOKE also selects MockDataSource inside Shell (see shell.rs).
     let smoke = std::env::var("CHM_SMOKE").is_ok();

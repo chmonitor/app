@@ -8,9 +8,10 @@
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use chm_clickhouse::ClickHouseClient;
-use chm_cloud_api::CloudClient;
-use chm_core::{DataSource, MockDataSource};
+use chm_core::{
+    DataSource, Health, MergeRow, MockDataSource, Overview, QueryRow, ReplicaRow, TableStat,
+    TimeRange, TrafficSeries,
+};
 
 use bezel::gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, Focusable, Hsla, KeyBinding,
@@ -19,9 +20,16 @@ use bezel::gpui::{
 use bezel::theme::Theme;
 use bezel::ui::widgets::status_dot;
 
+use crate::config::{ConfigFile, cli, config_path, load_profile, source_from_profile};
 use crate::connect::{ConnectEvent, ConnectFlow};
 use crate::pages::Page;
+use crate::pages::health::HealthPage;
+use crate::pages::merges::MergesPage;
 use crate::pages::overview::OverviewPage;
+use crate::pages::queries::QueriesPage;
+use crate::pages::replicas::ReplicasPage;
+use crate::pages::tables::TablesPage;
+use crate::pages::traffic::TrafficPage;
 
 actions!(chm_shell, [Refresh]);
 
@@ -38,83 +46,6 @@ const SIDEBAR_W_COMPACT: f32 = 48.0;
 fn perf() -> &'static chm_telemetry::PerfMetrics {
     static PERF: OnceLock<chm_telemetry::PerfMetrics> = OnceLock::new();
     PERF.get_or_init(chm_telemetry::PerfMetrics::new)
-}
-
-// ---------------------------------------------------------------------------
-// config.toml schema
-// ---------------------------------------------------------------------------
-
-/// Saved connection profile (`[profile]` table). Written by the Connect
-/// screen's Save button, read at startup.
-#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
-pub struct ProfileConfig {
-    /// "cloud" | "clickhouse"
-    pub mode: Option<String>,
-    /// Cloud mode: API base URL.
-    #[serde(default)]
-    pub base_url: Option<String>,
-    /// Cloud mode: API key.
-    #[serde(default)]
-    pub api_key: Option<String>,
-    /// Direct mode: ClickHouse HTTP endpoint.
-    #[serde(default)]
-    pub url: Option<String>,
-    /// Direct mode: user name.
-    #[serde(default)]
-    pub user: Option<String>,
-    /// Direct mode: password.
-    #[serde(default)]
-    pub password: Option<String>,
-    /// Release channel for the update check: "stable" | "beta".
-    #[serde(default)]
-    pub channel: Option<String>,
-}
-
-/// `[telemetry]` table — opt-in, default disabled.
-#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
-pub struct TelemetrySection {
-    #[serde(default)]
-    pub enabled: bool,
-}
-
-/// Whole `config.toml`.
-#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
-pub struct ConfigFile {
-    #[serde(default)]
-    pub profile: ProfileConfig,
-    #[serde(default)]
-    pub telemetry: TelemetrySection,
-}
-
-/// `<config_dir>/chmonitor/config.toml`.
-pub fn config_path() -> Option<std::path::PathBuf> {
-    dirs::config_dir().map(|d| d.join("chmonitor").join("config.toml"))
-}
-
-/// Read the saved profile, if a well-formed file exists. Any failure means
-/// "no profile" and the app shows the Connect screen.
-pub fn load_profile() -> Option<ProfileConfig> {
-    let text = std::fs::read_to_string(config_path()?).ok()?;
-    let cfg: ConfigFile = toml::from_str(&text).ok()?;
-    cfg.profile.mode.as_ref()?;
-    Some(cfg.profile)
-}
-
-/// Build the boxed data source behind [`chm_core::DataSource`] for a saved
-/// profile. `None` when required fields are missing.
-pub fn source_from_profile(p: &ProfileConfig) -> Option<Box<dyn DataSource>> {
-    match p.mode.as_deref()? {
-        "cloud" => Some(Box::new(CloudClient::new(
-            p.base_url.clone()?,
-            p.api_key.clone(),
-        ))),
-        "clickhouse" => Some(Box::new(ClickHouseClient::new(
-            p.url.clone()?,
-            p.user.clone().unwrap_or_else(|| "default".into()),
-            p.password.clone(),
-        ))),
-        _ => None,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -147,10 +78,18 @@ struct UpdateNote(SharedString);
 pub struct Shell {
     focus: FocusHandle,
     page: Page,
+    range: TimeRange,
     source: Option<Arc<Box<dyn DataSource>>>,
     conn: ConnState,
     last_refresh: Option<chrono::DateTime<chrono::Utc>>,
-    overview: Option<Entity<OverviewPage>>,
+    last_error: Option<String>,
+    overview: Entity<OverviewPage>,
+    queries: Entity<QueriesPage>,
+    merges: Entity<MergesPage>,
+    replicas: Entity<ReplicasPage>,
+    health: Entity<HealthPage>,
+    tables: Entity<TablesPage>,
+    traffic: Entity<TrafficPage>,
     connect: Entity<ConnectFlow>,
     update_note: Option<UpdateNote>,
 }
@@ -208,13 +147,16 @@ impl Shell {
         };
         cx.spawn(async move |this, cx| {
             let checker = chm_update::UpdateChecker::production();
-            let current = semver::Version::new(0, 1, 0);
+            let current = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+                .unwrap_or_else(|_| semver::Version::new(0, 1, 1));
             let note = match chm_core::tokio_block_on(checker.check(channel, &current)) {
                 Ok(Some(release)) => {
                     UpdateNote(format!("update available: v{}", release.version()).into())
                 }
                 Ok(None) => UpdateNote("up to date".into()),
-                Err(_) => return,
+                // Keep the status bar from sitting on "update check…" forever
+                // when the manifest host is unreachable.
+                Err(_) => UpdateNote(SharedString::default()),
             };
             let _ = this.update(cx, |shell, cx| {
                 shell.update_note = Some(note);
@@ -223,13 +165,28 @@ impl Shell {
         })
         .detach();
 
+        let force_connect = cli().connect;
+        let page = if force_connect || source.is_none() {
+            Page::Connect
+        } else {
+            Page::Overview
+        };
+
         let mut shell = Self {
             focus: cx.focus_handle(),
-            page: Page::Overview,
+            page,
+            range: TimeRange::TwentyFourHours,
             source,
             conn,
             last_refresh: None,
-            overview: None,
+            last_error: None,
+            overview: cx.new(|_| OverviewPage::new()),
+            queries: cx.new(|_| QueriesPage::new()),
+            merges: cx.new(|_| MergesPage::new()),
+            replicas: cx.new(|_| ReplicasPage::new()),
+            health: cx.new(|_| HealthPage::new()),
+            tables: cx.new(|_| TablesPage::new()),
+            traffic: cx.new(|_| TrafficPage::new()),
             connect: cx.new(|cx| ConnectFlow::new(load_profile(), cx)),
             update_note: None,
         };
@@ -247,6 +204,7 @@ impl Shell {
             } else {
                 ConnState::Error
             };
+            this.page = Page::Overview;
             this.refresh_now(cx);
             cx.notify();
         })
@@ -255,6 +213,15 @@ impl Shell {
         shell.start_poll(cx);
         shell.refresh_now(cx);
         shell
+    }
+
+    fn goto(&mut self, page: Page, cx: &mut Context<Self>) {
+        if self.page == page {
+            return;
+        }
+        self.page = page;
+        self.refresh_now(cx);
+        cx.notify();
     }
 
     /// Recurring refresh: each tick re-spawns itself, so a slow fetch can
@@ -279,39 +246,87 @@ impl Shell {
 
     /// Snapshot what a background fetch needs. Cheap: one Arc clone + a copy.
     fn poll_job(&self) -> Option<PollJob> {
+        if self.page == Page::Connect {
+            return None;
+        }
         self.source.as_ref().map(|src| PollJob {
             src: src.clone(),
             page: self.page,
+            range: self.range,
         })
     }
 
     /// Manual refresh action + initial fill.
     fn refresh_now(&mut self, cx: &mut Context<Self>) {
         let Some(job) = self.poll_job() else { return };
+        if self.conn != ConnState::Error {
+            self.conn = ConnState::Connecting;
+        }
         cx.spawn(async move |this, cx| apply_poll(job, &this, cx).await)
             .detach();
     }
 
-    /// Land fetched data back on the view (called from the async context).
-    fn set_overview_data(
+    fn apply_outcome(
         &mut self,
-        data: Result<chm_core::Overview, String>,
+        outcome: PollOutcome,
         at: chrono::DateTime<chrono::Utc>,
         cx: &mut Context<Self>,
     ) {
         self.last_refresh = Some(at);
-        self.conn = if data.is_ok() {
-            ConnState::Connected
-        } else {
-            ConnState::Error
-        };
-        if self.overview.is_none() {
-            self.overview = Some(cx.new(|_| OverviewPage::new()));
-        }
-        if let Some(page) = &self.overview {
-            page.update(cx, |p, cx| p.set_overview(data, cx));
+        match outcome {
+            PollOutcome::Overview { overview, traffic } => {
+                self.set_conn(overview.is_ok(), overview.as_ref().err().cloned());
+                self.overview
+                    .update(cx, |p, cx| p.set_overview(overview, traffic, cx));
+            }
+            PollOutcome::Queries {
+                running,
+                slow,
+                failed,
+            } => {
+                let ok = running.is_ok() || slow.is_ok() || failed.is_ok();
+                let err = running
+                    .as_ref()
+                    .err()
+                    .or(slow.as_ref().err())
+                    .or(failed.as_ref().err())
+                    .cloned();
+                self.set_conn(ok, err.filter(|_| !ok));
+                self.queries
+                    .update(cx, |p, cx| p.set(running, slow, failed, cx));
+            }
+            PollOutcome::Merges(data) => {
+                self.set_conn(data.is_ok(), data.as_ref().err().cloned());
+                self.merges.update(cx, |p, cx| p.set(data, cx));
+            }
+            PollOutcome::Replicas(data) => {
+                self.set_conn(data.is_ok(), data.as_ref().err().cloned());
+                self.replicas.update(cx, |p, cx| p.set(data, cx));
+            }
+            PollOutcome::Health(data) => {
+                self.set_conn(data.is_ok(), data.as_ref().err().cloned());
+                self.health.update(cx, |p, cx| p.set(data, cx));
+            }
+            PollOutcome::Tables(data) => {
+                self.set_conn(data.is_ok(), data.as_ref().err().cloned());
+                self.tables.update(cx, |p, cx| p.set(data, cx));
+            }
+            PollOutcome::Traffic(data) => {
+                self.set_conn(data.is_ok(), data.as_ref().err().cloned());
+                self.traffic.update(cx, |p, cx| p.set(data, cx));
+            }
         }
         cx.notify();
+    }
+
+    fn set_conn(&mut self, ok: bool, err: Option<String>) {
+        if ok {
+            self.conn = ConnState::Connected;
+            self.last_error = None;
+        } else {
+            self.conn = ConnState::Error;
+            self.last_error = err;
+        }
     }
 
     // -- rendering ----------------------------------------------------------
@@ -353,8 +368,7 @@ impl Shell {
                     .text_color(if active { theme.text } else { theme.text_muted })
                     .on_click(
                         cx.listener(move |this, _: &bezel::gpui::ClickEvent, _, cx| {
-                            this.page = page;
-                            cx.notify();
+                            this.goto(page, cx);
                         }),
                     )
                     .child(label)
@@ -370,6 +384,36 @@ impl Shell {
             .children(items)
     }
 
+    fn range_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> bezel::gpui::Div {
+        let mut row = div().flex().flex_row().items_center().gap(px(4.0));
+        for range in TimeRange::ALL {
+            let active = self.range == range;
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("range-{}", range.label())))
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .text_size(px(11.5))
+                    .when(active, |el| {
+                        el.bg(theme.element_active).text_color(theme.text)
+                    })
+                    .when(!active, |el| el.text_color(theme.text_muted))
+                    .hover(|s| s.bg(theme.element_hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.range != range {
+                            this.range = range;
+                            this.refresh_now(cx);
+                            cx.notify();
+                        }
+                    }))
+                    .child(range.label()),
+            );
+        }
+        row
+    }
+
     fn status_bar(&self, theme: &Theme) -> bezel::gpui::Div {
         let label = self
             .source
@@ -380,11 +424,15 @@ impl Shell {
             Some(at) => format!("updated {}", at.format("%H:%M:%S")),
             None => "not refreshed yet".to_string(),
         };
-        let note = self
-            .update_note
+        let note = match &self.update_note {
+            None => Some(SharedString::from("update check…")),
+            Some(UpdateNote(t)) if !t.is_empty() => Some(t.clone()),
+            Some(_) => None,
+        };
+        let err = self
+            .last_error
             .as_ref()
-            .map(|UpdateNote(t)| t.clone())
-            .unwrap_or_else(|| "update check…".into());
+            .map(|e| SharedString::from(e.clone()));
 
         div()
             .flex()
@@ -401,8 +449,9 @@ impl Shell {
             .child(status_dot(self.conn.dot(theme)))
             .child(div().min_w_0().truncate().child(label))
             .child(div().child(refreshed))
+            .children(err.map(|e| div().min_w_0().truncate().text_color(theme.danger).child(e)))
             .child(div().flex_1())
-            .child(div().text_color(theme.text_faint).child(note))
+            .children(note.map(|t| div().text_color(theme.text_faint).child(t)))
     }
 
     fn content(&mut self, _cx: &mut Context<Self>) -> bezel::gpui::AnyElement {
@@ -419,17 +468,13 @@ impl Shell {
                 .into_any_element();
         }
         match self.page {
-            Page::Overview => match &self.overview {
-                Some(page) => page.clone().into_any_element(),
-                None => placeholder("loading overview…").into_any_element(),
-            },
-            // Placeholder routes until Agents F/G/H replace pages/.
-            Page::Queries => placeholder("Queries — owned by Agent F").into_any_element(),
-            Page::Merges => placeholder("Merges — owned by Agent F").into_any_element(),
-            Page::Replicas => placeholder("Replicas — owned by Agent G").into_any_element(),
-            Page::Health => placeholder("Health — owned by Agent G").into_any_element(),
-            Page::Tables => placeholder("Tables — owned by Agent H").into_any_element(),
-            Page::Traffic => placeholder("Traffic — owned by Agent H").into_any_element(),
+            Page::Overview => self.overview.clone().into_any_element(),
+            Page::Queries => self.queries.clone().into_any_element(),
+            Page::Merges => self.merges.clone().into_any_element(),
+            Page::Replicas => self.replicas.clone().into_any_element(),
+            Page::Health => self.health.clone().into_any_element(),
+            Page::Tables => self.tables.clone().into_any_element(),
+            Page::Traffic => self.traffic.clone().into_any_element(),
             Page::Connect => self.connect.clone().into_any_element(),
         }
     }
@@ -447,6 +492,7 @@ impl Render for Shell {
 
         let viewport = window.viewport_size();
         let compact = viewport.width < px(COMPACT_BELOW);
+        let show_range = self.page.uses_range() && self.source.is_some();
 
         div()
             .id("shell")
@@ -471,8 +517,7 @@ impl Render for Shell {
                     .and_then(|n| n.checked_sub(1))
                     && let Some(&page) = Page::ALL.get(idx)
                 {
-                    this.page = page;
-                    cx.notify();
+                    this.goto(page, cx);
                 }
             }))
             .flex()
@@ -508,6 +553,23 @@ impl Render for Shell {
                     .min_w_0()
                     .child(
                         div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .px(px(16.0))
+                            .pt(px(12.0))
+                            .pb(px(4.0))
+                            .gap(px(12.0))
+                            .child(
+                                div()
+                                    .text_size(px(15.0))
+                                    .child(SharedString::from(self.page.title())),
+                            )
+                            .child(div().flex_1())
+                            .when(show_range, |row| row.child(self.range_bar(&theme, cx))),
+                    )
+                    .child(
+                        div()
                             .id("content-scroll")
                             .flex()
                             .flex_col()
@@ -532,33 +594,74 @@ impl Render for Shell {
 struct PollJob {
     src: Arc<Box<dyn DataSource>>,
     page: Page,
+    range: TimeRange,
+}
+
+enum PollOutcome {
+    Overview {
+        overview: Result<Overview, String>,
+        traffic: Result<TrafficSeries, String>,
+    },
+    Queries {
+        running: Result<Vec<QueryRow>, String>,
+        slow: Result<Vec<QueryRow>, String>,
+        failed: Result<Vec<QueryRow>, String>,
+    },
+    Merges(Result<Vec<MergeRow>, String>),
+    Replicas(Result<Vec<ReplicaRow>, String>),
+    Health(Result<Health, String>),
+    Tables(Result<Vec<TableStat>, String>),
+    Traffic(Result<TrafficSeries, String>),
+}
+
+fn map_err<T>(r: chm_core::Result<T>) -> Result<T, String> {
+    r.map_err(|e| e.to_string())
 }
 
 async fn apply_poll(job: PollJob, this: &WeakEntity<Shell>, cx: &mut AsyncApp) {
     let started = Instant::now();
-    let result = match job.page {
-        Page::Overview => fetch_overview(&job.src).await,
-        _ => return,
+    let src = job.src;
+    let range = job.range;
+    let outcome = match job.page {
+        Page::Connect => return,
+        Page::Overview => {
+            let (overview, traffic) = chm_core::tokio_block_on(async {
+                tokio::join!(src.overview(range), src.traffic(range))
+            });
+            PollOutcome::Overview {
+                overview: map_err(overview),
+                traffic: map_err(traffic),
+            }
+        }
+        Page::Queries => {
+            let (running, slow, failed) = chm_core::tokio_block_on(async {
+                tokio::join!(
+                    src.running_queries(),
+                    src.slow_queries(range),
+                    src.failed_queries(range)
+                )
+            });
+            PollOutcome::Queries {
+                running: map_err(running),
+                slow: map_err(slow),
+                failed: map_err(failed),
+            }
+        }
+        Page::Merges => PollOutcome::Merges(map_err(chm_core::tokio_block_on(src.merges()))),
+        Page::Replicas => PollOutcome::Replicas(map_err(chm_core::tokio_block_on(src.replicas()))),
+        Page::Health => PollOutcome::Health(map_err(chm_core::tokio_block_on(src.health()))),
+        Page::Tables => PollOutcome::Tables(map_err(chm_core::tokio_block_on(src.tables()))),
+        Page::Traffic => {
+            PollOutcome::Traffic(map_err(chm_core::tokio_block_on(src.traffic(range))))
+        }
     };
     // Telemetry hook: fetch latency lands in PerfMetrics whenever the process
     // global exists; recording itself is opt-in via config.toml at startup.
     let _ = perf().record_fetch(started.elapsed().as_secs_f64() * 1000.0);
     let at = chrono::Utc::now();
-    let _ = this.update(cx, |shell, cx| shell.set_overview_data(result, at, cx));
+    let _ = this.update(cx, |shell, cx| shell.apply_outcome(outcome, at, cx));
 }
 
-async fn fetch_overview(src: &Arc<Box<dyn DataSource>>) -> Result<chm_core::Overview, String> {
-    chm_core::tokio_block_on(src.overview(chm_core::TimeRange::TwentyFourHours))
-        .map_err(|e| e.to_string())
-}
-
-fn placeholder(text: &'static str) -> bezel::gpui::Div {
-    div()
-        .flex()
-        .flex_1()
-        .items_center()
-        .justify_center()
-        .text_color(bezel::theme::ink(0.45))
-        .text_size(px(13.0))
-        .child(text)
-}
+// Re-export so existing `crate::shell::ProfileConfig` paths keep compiling
+// if any leftover call sites remain.
+pub use crate::config::ProfileConfig;

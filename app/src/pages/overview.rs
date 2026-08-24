@@ -1,14 +1,17 @@
-//! Overview page — placeholder-level metric card grid.
-//! AGENT D owns this stub so smoke shots have content; Agents F/G/H replace
-//! pages/ wholesale later. Renders whatever `Shell` fetched (mock data under
-//! CHM_SMOKE=1).
+//! Overview page — metric cards plus a queries/sec sparkline.
+//! Renders whatever `Shell` fetched (mock data under CHM_SMOKE=1).
 
-use chm_core::Overview;
+use chm_core::{Overview, TrafficSeries};
 
 use bezel::gpui::{Context, Render, div, prelude::*, px};
 
+use crate::pages::status;
+use crate::widgets::geometry::{format_bytes, format_count};
+use crate::widgets::{NamedSeries, line_chart, metric_card};
+
 pub struct OverviewPage {
     data: Option<Overview>,
+    traffic: Option<TrafficSeries>,
     error: Option<String>,
 }
 
@@ -22,11 +25,17 @@ impl OverviewPage {
     pub fn new() -> Self {
         Self {
             data: None,
+            traffic: None,
             error: None,
         }
     }
 
-    pub fn set_overview(&mut self, data: Result<Overview, String>, cx: &mut Context<Self>) {
+    pub fn set_overview(
+        &mut self,
+        data: Result<Overview, String>,
+        traffic: Result<TrafficSeries, String>,
+        cx: &mut Context<Self>,
+    ) {
         match data {
             Ok(o) => {
                 self.data = Some(o);
@@ -34,27 +43,10 @@ impl OverviewPage {
             }
             Err(e) => self.error = Some(e),
         }
+        if let Ok(t) = traffic {
+            self.traffic = Some(t);
+        }
         cx.notify();
-    }
-
-    fn card(label: &'static str, value: String) -> bezel::gpui::Div {
-        div()
-            .w(px(180.0))
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .p(px(12.0))
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(bezel::theme::ink(0.10))
-            .bg(bezel::theme::ink(0.03))
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(bezel::theme::ink(0.55))
-                    .child(label),
-            )
-            .child(div().text_size(px(17.0)).child(value))
     }
 }
 
@@ -66,99 +58,96 @@ impl Render for OverviewPage {
     ) -> impl bezel::gpui::IntoElement {
         let _ = cx;
         if let Some(err) = &self.error {
-            return div()
-                .flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .text_color(bezel::theme::ink(0.55))
-                .text_size(px(13.0))
-                .child(format!("overview unavailable: {err}"));
+            return status(format!("overview unavailable: {err}"));
         }
         let Some(o) = &self.data else {
-            return div()
-                .flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .text_color(bezel::theme::ink(0.45))
-                .text_size(px(13.0))
-                .child("loading overview…");
+            return status("loading overview…");
         };
 
-        let rows: [[(&'static str, String); 4]; 3] = [
-            [
-                ("queries / sec", format!("{:.1}", o.qps)),
-                ("running", o.running_queries.to_string()),
-                ("slow · 24h", o.slow_queries_24h.to_string()),
-                ("failed · 24h", o.failed_queries_24h.to_string()),
-            ],
-            [
-                ("active merges", o.active_merges.to_string()),
-                (
-                    "replicas",
-                    format!("{} / {}", o.replicas_ok, o.replicas_total),
-                ),
-                ("tables", o.tables_total.to_string()),
-                ("parts", fmt_u64(o.parts_total)),
-            ],
-            [
-                ("disk used", fmt_bytes(o.disk_used_bytes)),
-                (
-                    "disk total",
-                    format!(
-                        "{} ({:.0}% used)",
-                        fmt_bytes(o.disk_total_bytes),
-                        100.0 * o.disk_used_bytes as f64 / o.disk_total_bytes.max(1) as f64
-                    ),
-                ),
-                ("uptime", fmt_duration(o.uptime_seconds)),
-                ("version", o.clickhouse_version.clone()),
-            ],
-        ];
+        let used_pct = 100.0 * o.disk_used_bytes as f64 / o.disk_total_bytes.max(1) as f64;
+        let disk_sub = format!(
+            "{} · {:.0}% used",
+            format_bytes(o.disk_total_bytes),
+            used_pct
+        );
 
-        let mut grid = div().flex().flex_col().gap(px(10.0));
-        for row in rows {
-            let mut line = div().flex().flex_row().gap(px(10.0));
-            for (label, value) in row {
-                line = line.child(Self::card(label, value));
-            }
-            grid = grid.child(line);
+        let mut grid = div().flex().flex_col().gap(px(10.0)).w_full();
+        grid = grid.child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(10.0))
+                .child(metric_card("queries / sec", &format!("{:.1}", o.qps), None))
+                .child(metric_card("running", &o.running_queries.to_string(), None))
+                .child(metric_card(
+                    "slow · 24h",
+                    &o.slow_queries_24h.to_string(),
+                    None,
+                ))
+                .child(metric_card(
+                    "failed · 24h",
+                    &o.failed_queries_24h.to_string(),
+                    None,
+                )),
+        );
+        grid = grid.child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(10.0))
+                .child(metric_card(
+                    "active merges",
+                    &o.active_merges.to_string(),
+                    None,
+                ))
+                .child(metric_card(
+                    "replicas",
+                    &format!("{} / {}", o.replicas_ok, o.replicas_total),
+                    None,
+                ))
+                .child(metric_card(
+                    "tables",
+                    &format_count(o.tables_total as f64),
+                    None,
+                ))
+                .child(metric_card(
+                    "parts",
+                    &format_count(o.parts_total as f64),
+                    None,
+                )),
+        );
+        grid = grid.child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(10.0))
+                .child(metric_card(
+                    "disk used",
+                    &format_bytes(o.disk_used_bytes),
+                    Some(&disk_sub),
+                ))
+                .child(metric_card("uptime", &fmt_uptime(o.uptime_seconds), None))
+                .child(metric_card("version", &o.clickhouse_version, None)),
+        );
+
+        if let Some(t) = &self.traffic
+            && !t.queries_per_sec.is_empty()
+        {
+            grid = grid.child(div().w_full().h(px(220.0)).child(line_chart(
+                "queries / sec",
+                "qps",
+                vec![NamedSeries {
+                    name: "qps".into(),
+                    points: t.queries_per_sec.clone(),
+                    accent: true,
+                }],
+            )));
         }
         grid
     }
 }
 
-/// Thousands separators, no external crate.
-fn fmt_u64(n: u64) -> String {
-    let s = n.to_string();
-    let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    for (i, b) in bytes.iter().enumerate() {
-        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
-            out.push('\'');
-        }
-        out.push(*b as char);
-    }
-    out
-}
-
-fn fmt_bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = n as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u < UNITS.len() - 1 {
-        v /= 1024.0;
-        u += 1;
-    }
-    if u == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.1} {}", UNITS[u])
-    }
-}
-
-fn fmt_duration(secs: u64) -> String {
+fn fmt_uptime(secs: u64) -> String {
     let d = secs / 86_400;
     let h = (secs % 86_400) / 3_600;
     match (d, h) {

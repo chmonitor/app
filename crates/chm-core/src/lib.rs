@@ -424,6 +424,8 @@ fn row_query(id: &str, user: &str, elapsed_ms: f64, mem: u64, sql: &str) -> Quer
 
 fn rep(name: &str, ro: bool, delay: f64) -> ReplicaRow {
     ReplicaRow {
+        database: "events".into(),
+        table: "clicks".into(),
         replica_name: name.into(),
         is_readonly: ro,
         absolute_delay_sec: delay,

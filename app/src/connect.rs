@@ -15,7 +15,7 @@ use bezel::theme::Theme;
 use bezel::ui::input::TextField;
 use bezel::ui::widgets::{ButtonStyle, Buttons};
 
-use crate::shell::{ProfileConfig, config_path, source_from_profile};
+use crate::config::{ProfileConfig, config_path, source_from_profile};
 
 /// Fired after Save successfully writes config.toml.
 #[derive(Debug, Clone)]
@@ -155,7 +155,7 @@ impl ConnectFlow {
         // already exists; otherwise start from defaults.
         let mut cfg = config_path()
             .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|text| toml::from_str::<crate::shell::ConfigFile>(&text).ok())
+            .and_then(|text| toml::from_str::<crate::config::ConfigFile>(&text).ok())
             .unwrap_or_default();
         cfg.profile = profile.clone();
         let out = match toml::to_string_pretty(&cfg) {

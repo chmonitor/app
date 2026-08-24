@@ -4,6 +4,7 @@
 //! AGENT E OWNS widgets/ (chart, table, metric card).
 //! AGENT F/G/H fill pages/. Keep all gpui types via `bezel::gpui`.
 
+pub mod config;
 pub mod connect;
 pub mod pages;
 pub mod shell;
