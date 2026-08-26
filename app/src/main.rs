@@ -4,8 +4,8 @@ use chm_app::config::{Cli, CliError, load_config};
 use chm_app::pages::settings::{appearance_from_cfg, apply_appearance};
 use chm_app::shell::{OpenSettings, Refresh, Shell, ToggleSidebar};
 use gpui::{
-    App, AppContext as _, Bounds, Focusable as _, KeyBinding, Menu, MenuItem, WindowBounds,
-    WindowOptions, actions, px, size,
+    App, AppContext as _, Bounds, Focusable as _, KeyBinding, Menu, MenuItem, TitlebarOptions,
+    WindowBounds, WindowOptions, actions, px, size,
 };
 use gpui_component::{Root, TitleBar};
 
@@ -65,11 +65,20 @@ fn main() {
 
             let appearance = appearance_from_cfg(load_config().ui.appearance.as_deref());
             let bounds = Bounds::centered(None, size(px(1100.0), px(720.0)), cx);
+            // Title the window: on X11 gpui only writes WM_NAME/_NET_WM_NAME
+            // when `titlebar.title` is set, and TitleBar::window_options()
+            // leaves it None — an untitled window is invisible to WMs,
+            // taskbars, and scripts/smoke.sh name matching.
+            let mut options = TitleBar::window_options();
+            options.titlebar = Some(TitlebarOptions {
+                title: Some("chmonitor".into()),
+                ..options.titlebar.take().unwrap_or_default()
+            });
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(720.0), px(480.0))),
-                    ..TitleBar::window_options()
+                    ..options
                 },
                 move |window, cx| {
                     apply_appearance(appearance, window, cx);

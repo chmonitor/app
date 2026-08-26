@@ -57,13 +57,18 @@ kill -0 "$APP_PID" 2>/dev/null || { tail -30 "$LOG"; fail "app exited early"; }
 log "app alive after ${WAIT_SECS}s (pid $APP_PID)"
 
 # --- window mapped? ----------------------------------------------------------
+# The app sets _NET_WM_NAME ("chmonitor") via its titlebar options. Prefer
+# `xdotool search --name`, which walks the whole window tree — on bare Xvfb
+# there is no WM, so `wmctrl -l` has no _NET_CLIENT_LIST to enumerate.
 window_found=""
 if [ -n "$wm_tool" ]; then
     for _ in $(seq 10); do
-        case "$wm_tool" in
-            wmctrl)  wmctrl -l 2>/dev/null | grep -qi chmonitor && window_found=yes ;;
-            xdotool) xdotool search --name -i chmonitor >/dev/null 2>&1 && window_found=yes ;;
-        esac
+        if command -v xdotool >/dev/null; then
+            DISPLAY="$DISPLAY_NUM" xdotool search --onlyvisible --name chmonitor >/dev/null 2>&1 &&
+                window_found=yes
+        elif DISPLAY="$DISPLAY_NUM" wmctrl -l 2>/dev/null | grep -qi chmonitor; then
+            window_found=yes
+        fi
         [ -n "$window_found" ] && break
         sleep 1
     done
