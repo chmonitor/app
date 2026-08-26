@@ -1,10 +1,13 @@
-//! Data table: header row, zebra-striped body rows, monospace right-aligned
-//! numerics. Cell values render through the [`geometry`](super::geometry)
-//! formatters so units stay consistent across the app.
+//! Data table: header row, body rows, right-aligned numerics.
+//! Semantic structure comes from gpui-base; colors and density from the theme.
+
+use gpui::{App, ElementId, div, prelude::*, px};
+use gpui_base::{Table, TableBody, TableCell, TableHead, TableHeader, TableRow};
+use gpui_component::ActiveTheme as _;
+
+use crate::density::Density;
 
 use super::geometry::{format_bytes, format_count, format_duration_ms};
-use bezel::gpui::{Div, Hsla, div, prelude::*, px};
-use bezel::theme::{Theme, current_appearance, hairline};
 
 /// One cell's value; the variant picks the formatter and the alignment.
 #[derive(Debug, Clone, PartialEq)]
@@ -19,6 +22,21 @@ pub enum CellVal {
     DurMs(f64),
 }
 
+impl CellVal {
+    fn display(&self) -> String {
+        match self {
+            CellVal::Text(text) => text.clone(),
+            CellVal::Num(n) => format_count(*n),
+            CellVal::Bytes(b) => format_bytes(*b),
+            CellVal::DurMs(ms) => format_duration_ms(*ms),
+        }
+    }
+
+    fn numeric(&self) -> bool {
+        !matches!(self, CellVal::Text(_))
+    }
+}
+
 /// A column: header label plus an optional fixed width in logical pixels.
 /// `None` lets the column flex with the container.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -27,115 +45,80 @@ pub struct Column {
     pub width: Option<f32>,
 }
 
-/// Render one cell to a styled div. Public within the crate so pages can
-/// reuse the exact cell styling inside custom rows.
-impl CellVal {
-    pub fn render(self) -> Div {
-        let t = Theme::for_appearance(current_appearance());
-        match self {
-            CellVal::Text(text) => div()
-                .text_size(px(11.0))
-                .text_color(t.text)
-                .truncate()
-                .child(text),
-            CellVal::Num(n) => numeric_cell(format_count(n), t.text),
-            CellVal::Bytes(b) => numeric_cell(format_bytes(b), t.text),
-            CellVal::DurMs(ms) => numeric_cell(format_duration_ms(ms), t.text),
-        }
-    }
-}
-
-fn numeric_cell(text: String, color: Hsla) -> Div {
-    let t = Theme::for_appearance(current_appearance());
-    div()
-        .font_family(t.font_mono.clone())
-        .text_size(px(11.0))
-        .text_color(color)
-        .flex()
-        .justify_end()
-        .child(text)
-}
-
-/// Header + striped rows. Rows may be ragged: short rows simply leave the
+/// Header + rows. Rows may be ragged: short rows simply leave the
 /// trailing columns empty.
-pub fn data_table(columns: Vec<Column>, rows: Vec<Vec<CellVal>>) -> impl IntoElement {
-    let t = Theme::for_appearance(current_appearance());
-    let border = t.border;
-    let stripe = hairline(0.03);
-    let muted = t.text_muted;
+pub fn data_table(
+    id: impl Into<ElementId>,
+    columns: Vec<Column>,
+    rows: Vec<Vec<CellVal>>,
+    cx: &App,
+) -> impl IntoElement {
+    let id = id.into();
+    let border = cx.theme().border;
+    let muted = cx.theme().muted_foreground;
+    let header_bg = cx.theme().secondary;
+    let n_cols = columns.len();
+    let n_rows = rows.len();
+    let d = Density::current();
+    let px_cell = d.table_px();
+    let py_cell = d.table_py();
 
-    let mut header_cells = Vec::with_capacity(columns.len());
-    for col in &columns {
-        let mut cell = div().child(
-            div()
-                .text_size(px(10.0))
+    let header = TableHeader::new("header").child(TableRow::new("header-row", 1).flex().children(
+        columns.iter().enumerate().map(|(i, col)| {
+            let mut head = TableHead::new(("head", i), i + 1)
+                .px(px(px_cell))
+                .py(px(py_cell))
+                .text_xs()
                 .text_color(muted)
-                .truncate()
-                .child(col.name.clone()),
-        );
-        match col.width {
-            Some(w) => cell = cell.w(px(w)).flex_none(),
-            None => cell = cell.flex_1(),
-        }
-        header_cells.push(cell);
-    }
-
-    let mut row_els = Vec::with_capacity(rows.len());
-    for (ix, cells) in rows.iter().enumerate() {
-        let mut row = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(12.0))
-            .px(px(12.0))
-            .py(px(6.0));
-        if ix % 2 == 1 {
-            row = row.bg(stripe);
-        }
-        for (col_ix, value) in cells.iter().enumerate() {
-            let align_right = !matches!(value, CellVal::Text(_));
-            let mut cell = value.clone().render();
-            if align_right
-                && let Some(col) = columns.get(col_ix)
-                && col.width.is_none()
-            {
-                cell = cell.flex_1();
-            } else if columns.get(col_ix).is_some_and(|c| c.width.is_some()) {
-                cell = cell.flex_none();
-                if let Some(w) = columns.get(col_ix).and_then(|c| c.width) {
-                    cell = cell.w(px(w));
-                }
+                .child(col.name.clone());
+            if let Some(w) = col.width {
+                head = head.w(px(w)).flex_none();
             } else {
-                cell = cell.flex_1();
+                head = head.flex_1();
             }
-            row = row.child(cell);
-        }
-        for _ in cells.len()..columns.len() {
-            row = row.child(div().flex_1());
-        }
-        row_els.push(row);
-    }
+            head
+        }),
+    ));
 
-    div()
+    let body =
+        TableBody::new("body").children(rows.into_iter().enumerate().map(|(row_ix, cells)| {
+            let cols = &columns;
+            TableRow::new(("row", row_ix), row_ix + 2)
+                .flex()
+                .border_t_1()
+                .border_color(border)
+                .children((0..cols.len()).map(|i| {
+                    let mut cell = match cells.get(i) {
+                        Some(value) => {
+                            let mut c = TableCell::new(format!("cell-{row_ix}-{i}"), i + 1)
+                                .px(px(px_cell))
+                                .py(px(py_cell))
+                                .text_xs()
+                                .child(value.display());
+                            if value.numeric() {
+                                c = c.text_right();
+                            }
+                            c
+                        }
+                        None => TableCell::new(format!("empty-{row_ix}-{i}"), i + 1).child(div()),
+                    };
+                    if let Some(w) = cols.get(i).and_then(|c| c.width) {
+                        cell = cell.w(px(w)).flex_none();
+                    } else {
+                        cell = cell.flex_1();
+                    }
+                    cell
+                }))
+        }));
+
+    Table::new(id)
         .w_full()
         .overflow_hidden()
         .border_1()
         .border_color(border)
-        .rounded(px(Theme::PANEL_RADIUS))
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(12.0))
-                .px(px(12.0))
-                .py(px(8.0))
-                .bg(hairline(0.04))
-                .border_b_1()
-                .border_color(border)
-                .children(header_cells),
-        )
-        .children(row_els)
+        .rounded(cx.theme().radius)
+        .row_count(n_rows + 1)
+        .column_count(n_cols)
+        .child(header.bg(header_bg))
+        .child(body)
 }

@@ -4,6 +4,7 @@ members = [
     "crates/chm-core",
     "crates/chm-cloud-api",
     "crates/chm-clickhouse",
+    "crates/chm-postgres",
     "crates/chm-update",
     "crates/chm-telemetry",
     "app",
@@ -19,13 +20,19 @@ license = "MIT"
 chm-core = { path = "crates/chm-core" }
 chm-cloud-api = { path = "crates/chm-cloud-api" }
 chm-clickhouse = { path = "crates/chm-clickhouse" }
+chm-postgres = { path = "crates/chm-postgres" }
 chm-update = { path = "crates/chm-update" }
 chm-telemetry = { path = "crates/chm-telemetry" }
 
-# bezel stack — pinned to exact revs; all gpui types flow through bezel::gpui.
-bezel = { git = "https://github.com/crabtalk/bezel", rev = "f86dbbfc84569cc69f3cba6ebb3d99d858dcb259" }
-gpui = { git = "https://github.com/crabtalk/zed", rev = "cf1b90ec8cfda974a50b0c9eaebfdab28d7f0423", version = "0.2.2" }
-gpui_platform = { git = "https://github.com/crabtalk/zed", rev = "cf1b90ec8cfda974a50b0c9eaebfdab28d7f0423", features = ["font-kit", "x11"] }
+# gpui-component stack — official Zed GPUI + Longbridge widgets.
+# runtime_shaders compiles Metal shaders at launch so `cargo build` works on a
+# Mac that only has Command Line Tools (no Xcode `metal` compiler). Prefer the
+# precompiled path when Xcode is installed — drop this feature then.
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "runtime_shaders"] }
+gpui-base = { git = "https://github.com/longbridge/gpui-component" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 
 # crates-io
 anyhow = "1"

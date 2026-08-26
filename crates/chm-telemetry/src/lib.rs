@@ -10,7 +10,7 @@
 //!   [`TelemetryConfig::endpoint`].
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use chm_update::Channel;
 use serde::{Deserialize, Serialize};
@@ -126,6 +126,7 @@ impl RingBuffer {
 pub struct PerfMetrics {
     frame_ms: Mutex<RingBuffer>,
     fetch_ms: Mutex<RingBuffer>,
+    rss_bytes: Mutex<Option<u64>>,
 }
 
 impl Default for PerfMetrics {
@@ -139,6 +140,7 @@ impl PerfMetrics {
         Self {
             frame_ms: Mutex::new(RingBuffer::new()),
             fetch_ms: Mutex::new(RingBuffer::new()),
+            rss_bytes: Mutex::new(None),
         }
     }
 
@@ -168,6 +170,18 @@ impl PerfMetrics {
 
     pub fn fetch_count(&self) -> usize {
         self.fetch_ms.lock().unwrap().samples.len()
+    }
+
+    pub fn record_rss(&self, bytes: u64) {
+        *self.rss_bytes.lock().unwrap() = Some(bytes);
+    }
+
+    pub fn last_rss(&self) -> Option<u64> {
+        *self.rss_bytes.lock().unwrap()
+    }
+
+    pub fn last_fetch_ms(&self) -> Option<f64> {
+        self.fetch_ms.lock().unwrap().samples.back().copied()
     }
 
     pub fn reset(&mut self) {
@@ -234,10 +248,144 @@ impl Event {
 }
 
 /// Allowlist of event names. Anything else is rejected at construction.
-const ALLOWED_EVENT_NAMES: &[&str] = &["app_launch", "app_quit", "page_view", "query_executed"];
+const ALLOWED_EVENT_NAMES: &[&str] = &[
+    "app_launch",
+    "app_quit",
+    "app_loaded",
+    "page_view",
+    "cluster_connected",
+    "health_viewed",
+    "queries_viewed",
+    "query_executed",
+];
 
 /// Page-name allowlist for `page_view.props.page`.
-pub const ALLOWED_PAGE_NAMES: &[&str] = &["overview", "queries", "settings"];
+pub const ALLOWED_PAGE_NAMES: &[&str] = &[
+    "overview", "queries", "merges", "replicas", "health", "tables", "traffic", "connect",
+    "settings",
+];
+
+pub fn http_client() -> &'static reqwest::Client {
+    static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
+    HTTP.get_or_init(reqwest::Client::new)
+}
+
+/// Production ingest (opt-in only).
+pub const TELEMETRY_PING_URL: &str = "https://telemetry.chmonitor.dev/v1/ping";
+pub const TELEMETRY_EVENT_URL: &str = "https://telemetry.chmonitor.dev/v1/event";
+
+/// Opaque 64-char hex install id, persisted under the user config dir.
+pub fn install_id() -> String {
+    let path = dirs::config_dir().map(|d| d.join("chmonitor").join("install_id"));
+    if let Some(path) = &path
+        && let Ok(existing) = std::fs::read_to_string(path)
+    {
+        let trimmed = existing.trim().to_ascii_lowercase();
+        if trimmed.len() == 64 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return trimmed;
+        }
+    }
+    let mut raw = [0u8; 32];
+    #[cfg(unix)]
+    {
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            use std::io::Read;
+            let _ = f.read_exact(&mut raw);
+        }
+    }
+    if raw.iter().all(|b| *b == 0) {
+        let seed = format!(
+            "{}:{}:{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+            std::env::consts::OS
+        );
+        raw = sha256_bytes(seed.as_bytes());
+    }
+    let hex = hex64(&raw);
+    if let Some(path) = path {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, &hex);
+    }
+    hex
+}
+
+fn sha256_bytes(input: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(input);
+    h.finalize().into()
+}
+
+fn hex64(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Current process RSS in bytes (best-effort; `ps` on Unix).
+pub fn rss_bytes() -> Option<u64> {
+    let pid = std::process::id().to_string();
+    let out = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid])
+        .output()
+        .ok()?;
+    let kb: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+    Some(kb.saturating_mul(1024))
+}
+
+/// POST `/v1/ping` so this install is counted. No-op when `enabled` is false.
+pub async fn ping(http: &reqwest::Client, cfg: &TelemetryConfig) -> Result<()> {
+    if !cfg.enabled {
+        return Ok(());
+    }
+    let body = json!({
+        "instance_hash": install_id(),
+        "deploy_target": "unknown",
+        "platform": match std::env::consts::OS {
+            "macos" => "macos",
+            "linux" => "linux",
+            "windows" => "windows",
+            _ => "unknown",
+        },
+        "chm_version": cfg.app_version,
+    });
+    http.post(TELEMETRY_PING_URL)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+/// POST `/v1/event` (worker allowlist). No-op when disabled.
+pub async fn track(http: &reqwest::Client, cfg: &TelemetryConfig, event: &str) -> Result<()> {
+    if !cfg.enabled {
+        return Ok(());
+    }
+    if !matches!(
+        event,
+        "app_loaded" | "cluster_connected" | "health_viewed" | "queries_viewed" | "ai_query_sent"
+    ) {
+        return Err(Error::DisallowedEvent(event.into()));
+    }
+    let body = json!({
+        "event": event,
+        "props": {
+            "deploy_target": "unknown",
+            "ch_flavor": "unknown",
+        }
+    });
+    http.post(TELEMETRY_EVENT_URL)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
 
 /// Queues events and flushes them to the configured endpoint.
 ///
@@ -484,6 +632,15 @@ mod tests {
         assert_eq!(frames.p50, 343.0);
         assert_eq!(frames.p95, 573.0);
         assert_eq!(frames.p99, 594.0);
+    }
+
+    #[test]
+    fn install_id_is_64_hex_and_stable() {
+        let a = install_id();
+        let b = install_id();
+        assert_eq!(a.len(), 64);
+        assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(a, b);
     }
 
     #[test]

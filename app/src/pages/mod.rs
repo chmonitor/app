@@ -1,9 +1,16 @@
-//! Page routing. AGENT D owns mod.rs; Agents F/G/H own the individual page
-//! files and will replace the placeholder bodies in shell.rs's `content`.
+//! Page routing.
 
-use bezel::gpui::{AnyElement, SharedString, div, prelude::*, px};
+use gpui::{App, FontWeight, SharedString, div, prelude::*};
+use gpui_component::{ActiveTheme as _, IconName};
 
+pub mod health;
+pub mod merges;
 pub mod overview;
+pub mod queries;
+pub mod replicas;
+pub mod settings;
+pub mod tables;
+pub mod traffic;
 
 /// Every sidebar destination, in keyboard-shortcut order (1-8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +23,7 @@ pub enum Page {
     Tables,
     Traffic,
     Connect,
+    Settings,
 }
 
 impl Page {
@@ -45,27 +53,80 @@ impl Page {
             Page::Tables => "Tables",
             Page::Traffic => "Traffic",
             Page::Connect => "Connect",
+            Page::Settings => "Settings",
         }
     }
 
-    /// Sidebar glyph. Text markers until Agent E's icon widget lands; the
-    /// sidebar renders whatever this returns, so swapping in real icons is a
-    /// one-file change.
-    pub fn icon(self) -> AnyElement {
-        let glyph: &str = match self {
-            Page::Overview => "◧",
-            Page::Queries => "⌕",
-            Page::Merges => "⇄",
-            Page::Replicas => "⑃",
-            Page::Health => "♥",
-            Page::Tables => "▤",
-            Page::Traffic => "↕",
-            Page::Connect => "⌁",
-        };
-        div()
-            .w(px(16.0))
-            .text_size(px(13.0))
-            .child(SharedString::from(glyph.to_string()))
-            .into_any_element()
+    /// Pages whose fetch takes the selected time range.
+    pub fn uses_range(self) -> bool {
+        matches!(self, Page::Overview | Page::Queries | Page::Traffic)
+    }
+
+    /// ClickHouse-only pages are hidden on a Postgres host.
+    pub fn available(self, engine: chm_core::SourceEngine) -> bool {
+        match engine {
+            chm_core::SourceEngine::Postgres => !matches!(self, Page::Merges | Page::Traffic),
+            _ => true,
+        }
+    }
+
+    pub fn icon(self) -> IconName {
+        match self {
+            Page::Overview => IconName::LayoutDashboard,
+            Page::Queries => IconName::Search,
+            Page::Merges => IconName::Replace,
+            Page::Replicas => IconName::Copy,
+            Page::Health => IconName::Heart,
+            Page::Tables => IconName::File,
+            Page::Traffic => IconName::ChartPie,
+            Page::Connect => IconName::Globe,
+            Page::Settings => IconName::Settings,
+        }
+    }
+}
+
+pub(crate) fn status(text: impl Into<SharedString>, cx: &App) -> gpui::Div {
+    div()
+        .flex()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .text_color(cx.theme().muted_foreground)
+        .text_sm()
+        .child(text.into())
+}
+
+pub(crate) fn heading(title: &str, cx: &App) -> gpui::Div {
+    div()
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(cx.theme().muted_foreground)
+        .child(SharedString::from(title.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_pages_have_stable_indexes_and_titles() {
+        assert_eq!(Page::ALL.len(), 8);
+        for (i, page) in Page::ALL.iter().enumerate() {
+            assert_eq!(page.index(), i);
+            assert!(!page.title().is_empty());
+        }
+        assert_eq!(Page::Overview.title(), "Overview");
+        assert_eq!(Page::Connect.title(), "Connect");
+        assert_eq!(Page::Connect.index(), 7);
+        assert!(Page::Overview.uses_range());
+        assert!(Page::Queries.uses_range());
+        assert!(Page::Traffic.uses_range());
+        assert!(!Page::Merges.uses_range());
+        assert!(!Page::Connect.uses_range());
+        assert_eq!(Page::Settings.title(), "Settings");
+        assert!(!Page::ALL.contains(&Page::Settings));
+        assert!(!Page::Merges.available(chm_core::SourceEngine::Postgres));
+        assert!(Page::Queries.available(chm_core::SourceEngine::Postgres));
+        assert!(Page::Merges.available(chm_core::SourceEngine::ClickHouse));
     }
 }

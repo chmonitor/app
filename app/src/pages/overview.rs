@@ -1,14 +1,20 @@
-//! Overview page — placeholder-level metric card grid.
-//! AGENT D owns this stub so smoke shots have content; Agents F/G/H replace
-//! pages/ wholesale later. Renders whatever `Shell` fetched (mock data under
-//! CHM_SMOKE=1).
+//! Overview page — the handful of metrics that answer "is this cluster
+//! healthy?", plus an optional queries/sec sparkline. Visible tiles and
+//! density come from `[ui]` (Settings).
 
-use chm_core::Overview;
+use chm_core::{Overview, TrafficSeries};
 
-use bezel::gpui::{Context, Render, div, prelude::*, px};
+use gpui::{Context, Render, Window, div, prelude::*, px};
+
+use crate::config::load_config;
+use crate::density::{Density, OverviewMetric, visible_metrics};
+use crate::pages::status;
+use crate::widgets::geometry::{format_bytes, format_count};
+use crate::widgets::{NamedSeries, kpi_card, line_chart};
 
 pub struct OverviewPage {
     data: Option<Overview>,
+    traffic: Option<TrafficSeries>,
     error: Option<String>,
 }
 
@@ -22,11 +28,17 @@ impl OverviewPage {
     pub fn new() -> Self {
         Self {
             data: None,
+            traffic: None,
             error: None,
         }
     }
 
-    pub fn set_overview(&mut self, data: Result<Overview, String>, cx: &mut Context<Self>) {
+    pub fn set_overview(
+        &mut self,
+        data: Result<Overview, String>,
+        traffic: Result<TrafficSeries, String>,
+        cx: &mut Context<Self>,
+    ) {
         match data {
             Ok(o) => {
                 self.data = Some(o);
@@ -34,136 +46,195 @@ impl OverviewPage {
             }
             Err(e) => self.error = Some(e),
         }
+        if let Ok(t) = traffic {
+            self.traffic = Some(t);
+        }
         cx.notify();
-    }
-
-    fn card(label: &'static str, value: String) -> bezel::gpui::Div {
-        div()
-            .w(px(180.0))
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .p(px(12.0))
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(bezel::theme::ink(0.10))
-            .bg(bezel::theme::ink(0.03))
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(bezel::theme::ink(0.55))
-                    .child(label),
-            )
-            .child(div().text_size(px(17.0)).child(value))
     }
 }
 
 impl Render for OverviewPage {
-    fn render(
-        &mut self,
-        _window: &mut bezel::gpui::Window,
-        cx: &mut Context<Self>,
-    ) -> impl bezel::gpui::IntoElement {
-        let _ = cx;
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(err) = &self.error {
-            return div()
-                .flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .text_color(bezel::theme::ink(0.55))
-                .text_size(px(13.0))
-                .child(format!("overview unavailable: {err}"));
+            return status(format!("overview unavailable: {err}"), cx).into_any_element();
         }
         let Some(o) = &self.data else {
-            return div()
-                .flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .text_color(bezel::theme::ink(0.45))
-                .text_size(px(13.0))
-                .child("loading overview…");
+            return crate::widgets::skeleton::metric_grid(cx).into_any_element();
         };
 
-        let rows: [[(&'static str, String); 4]; 3] = [
-            [
-                ("queries / sec", format!("{:.1}", o.qps)),
-                ("running", o.running_queries.to_string()),
-                ("slow · 24h", o.slow_queries_24h.to_string()),
-                ("failed · 24h", o.failed_queries_24h.to_string()),
-            ],
-            [
-                ("active merges", o.active_merges.to_string()),
-                (
-                    "replicas",
-                    format!("{} / {}", o.replicas_ok, o.replicas_total),
-                ),
-                ("tables", o.tables_total.to_string()),
-                ("parts", fmt_u64(o.parts_total)),
-            ],
-            [
-                ("disk used", fmt_bytes(o.disk_used_bytes)),
-                (
-                    "disk total",
-                    format!(
-                        "{} ({:.0}% used)",
-                        fmt_bytes(o.disk_total_bytes),
-                        100.0 * o.disk_used_bytes as f64 / o.disk_total_bytes.max(1) as f64
-                    ),
-                ),
-                ("uptime", fmt_duration(o.uptime_seconds)),
-                ("version", o.clickhouse_version.clone()),
-            ],
-        ];
+        let ui = load_config().ui;
+        let density = Density::from_cfg(ui.density.as_deref());
+        let metrics = visible_metrics(&ui.overview_metrics);
+        let gap = px(density.card_gap());
+        let per_row = density.metrics_per_row();
 
-        let mut grid = div().flex().flex_col().gap(px(10.0));
-        for row in rows {
-            let mut line = div().flex().flex_row().gap(px(10.0));
-            for (label, value) in row {
-                line = line.child(Self::card(label, value));
+        let mut grid = div().flex().flex_col().gap(gap).w_full();
+        for chunk in metrics.chunks(per_row) {
+            let mut row = div().flex().flex_row().gap(gap);
+            for metric in chunk {
+                row = row.child(tile(*metric, o, cx));
             }
-            grid = grid.child(line);
+            grid = grid.child(row);
         }
-        grid
-    }
-}
 
-/// Thousands separators, no external crate.
-fn fmt_u64(n: u64) -> String {
-    let s = n.to_string();
-    let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    for (i, b) in bytes.iter().enumerate() {
-        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
-            out.push('\'');
+        if ui.show_chart
+            && let Some(t) = &self.traffic
+            && !t.queries_per_sec.is_empty()
+        {
+            grid = grid.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .h(px(density.chart_h()))
+                    .child(line_chart(
+                        "queries / sec",
+                        "qps",
+                        vec![NamedSeries {
+                            name: "qps".into(),
+                            points: t.queries_per_sec.clone(),
+                            accent: true,
+                        }],
+                        cx,
+                    )),
+            );
         }
-        out.push(*b as char);
-    }
-    out
-}
-
-fn fmt_bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = n as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u < UNITS.len() - 1 {
-        v /= 1024.0;
-        u += 1;
-    }
-    if u == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.1} {}", UNITS[u])
+        grid.into_any_element()
     }
 }
 
-fn fmt_duration(secs: u64) -> String {
+fn tile(metric: OverviewMetric, o: &Overview, cx: &gpui::App) -> impl gpui::IntoElement {
+    match metric {
+        OverviewMetric::Running => kpi_card(
+            "Active Queries",
+            o.running_queries.to_string(),
+            Some("running"),
+            Some(format!(
+                "{} queries today",
+                format_count(o.queries_today as f64)
+            )),
+            None,
+            cx,
+        ),
+        OverviewMetric::Schema => {
+            let unit = if o.databases_total == 1 {
+                "database"
+            } else {
+                "databases"
+            };
+            let tables = if o.tables_total == 1 {
+                "1 table".into()
+            } else {
+                format!("{} tables", format_count(o.tables_total as f64))
+            };
+            kpi_card(
+                "Schema",
+                o.databases_total.to_string(),
+                Some(unit),
+                Some(tables),
+                None,
+                cx,
+            )
+        }
+        OverviewMetric::Disk => {
+            let used_pct = 100.0 * o.disk_used_bytes as f64 / o.disk_total_bytes.max(1) as f64;
+            let free = o.disk_total_bytes.saturating_sub(o.disk_used_bytes);
+            kpi_card(
+                "Storage",
+                format_bytes(o.disk_used_bytes),
+                None,
+                Some(format!(
+                    "{:.0}% of {} · {} free",
+                    used_pct,
+                    format_bytes(o.disk_total_bytes),
+                    format_bytes(free)
+                )),
+                Some(used_pct as f32),
+                cx,
+            )
+        }
+        OverviewMetric::Uptime => kpi_card(
+            "Uptime",
+            fmt_uptime(o.uptime_seconds),
+            None,
+            Some(o.clickhouse_version.clone()),
+            None,
+            cx,
+        ),
+        OverviewMetric::Qps => kpi_card(
+            "queries / sec",
+            format!("{:.1}", o.qps),
+            None,
+            None,
+            None,
+            cx,
+        ),
+        OverviewMetric::Slow => kpi_card(
+            "slow · 24h",
+            o.slow_queries_24h.to_string(),
+            None,
+            None,
+            None,
+            cx,
+        ),
+        OverviewMetric::Failed => kpi_card(
+            "failed · 24h",
+            o.failed_queries_24h.to_string(),
+            None,
+            None,
+            None,
+            cx,
+        ),
+        OverviewMetric::Merges => kpi_card(
+            "active merges",
+            o.active_merges.to_string(),
+            None,
+            None,
+            None,
+            cx,
+        ),
+        OverviewMetric::Replicas => kpi_card(
+            "replicas",
+            format!("{} / {}", o.replicas_ok, o.replicas_total),
+            None,
+            None,
+            None,
+            cx,
+        ),
+        OverviewMetric::Tables => kpi_card(
+            "tables",
+            format_count(o.tables_total as f64),
+            None,
+            None,
+            None,
+            cx,
+        ),
+        OverviewMetric::Parts => kpi_card(
+            "parts",
+            format_count(o.parts_total as f64),
+            None,
+            None,
+            None,
+            cx,
+        ),
+        OverviewMetric::Version => kpi_card(
+            "version",
+            o.clickhouse_version.clone(),
+            None,
+            None,
+            None,
+            cx,
+        ),
+    }
+}
+
+fn fmt_uptime(secs: u64) -> String {
     let d = secs / 86_400;
     let h = (secs % 86_400) / 3_600;
     match (d, h) {
         (0, 0) => format!("{}m", secs / 60),
         (0, h) => format!("{h}h"),
+        (d, 0) => format!("{d}d"),
         (d, h) => format!("{d}d {h}h"),
     }
 }

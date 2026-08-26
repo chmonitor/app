@@ -191,42 +191,26 @@ jobs:
           VERSION: ${{ needs.channel.outputs.version }}
         run: |
           set -euo pipefail
-          APP_BUNDLE="$APP_NAME.app"
-          mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
-          cp "target/$TARGET/$PROFILE/$BIN_NAME" "$APP_BUNDLE/Contents/MacOS/$BIN_NAME"
-          chmod +x "$APP_BUNDLE/Contents/MacOS/$BIN_NAME"
-          cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleName</key><string>$APP_NAME</string>
-            <key>CFBundleDisplayName</key><string>$APP_NAME</string>
-            <key>CFBundleIdentifier</key><string>io.chmonitor.desktop</string>
-            <key>CFBundleVersion</key><string>$VERSION</string>
-            <key>CFBundleShortVersionString</key><string>$VERSION</string>
-            <key>CFBundleExecutable</key><string>$BIN_NAME</string>
-            <key>CFBundlePackageType</key><string>APPL</string>
-            <key>NSHighResolutionCapable</key><true/>
-          </dict>
-          </plist>
-          PLIST
-          printf 'chmonitor %s (%s)\n' "$TAG" "$TARGET" > "$APP_BUNDLE/Contents/Resources/README.txt"
-          zip -qry "chmonitor-$TAG-$TARGET.zip" "$APP_BUNDLE"
-          rm -rf "$APP_BUNDLE"
+          chmod +x scripts/build-macos.sh
+          APP="$(scripts/build-macos.sh --bin "target/$TARGET/$PROFILE/$BIN_NAME" --version "$VERSION" --out "$PWD/dist/macos")"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "chmonitor-$TAG-$TARGET.zip"
 
-      # SHA256 of the raw packaged binary feeds the update manifests;
-      # PKG is the archive attached to the release.
-      - name: Binary sha256 + package name
+      # SHA256 of the downloadable archive (zip/tar.gz) feeds the update
+      # manifests so the in-app downloader can verify what it fetched.
+      - name: Archive sha256 + package name
         id: meta
         env:
           TAG: ${{ needs.channel.outputs.tag }}
         run: |
           set -euo pipefail
-          SHA="$(sha256sum "target/$TARGET/$PROFILE/$BIN_NAME" | cut -d' ' -f1)"
           if [ "${{ runner.os }}" = "Linux" ]; then EXT=tar.gz; else EXT=zip; fi
           PKG="chmonitor-$TAG-$TARGET.$EXT"
           test -f "$PKG"
+          if command -v sha256sum >/dev/null; then
+            SHA="$(sha256sum "$PKG" | cut -d' ' -f1)"
+          else
+            SHA="$(shasum -a 256 "$PKG" | cut -d' ' -f1)"
+          fi
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
           echo "package=$PKG" >> "$GITHUB_OUTPUT"
 

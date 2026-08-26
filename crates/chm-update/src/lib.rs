@@ -48,14 +48,15 @@ pub enum Error {
     BadManifest(String),
     #[error("invalid version in update manifest: {0}")]
     VersionParse(#[from] semver::Error),
+    #[error("update download checksum mismatch: expected {expected}, got {got}")]
+    Checksum { expected: String, got: String },
+    #[error("update download io failed: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// A release advertised on a channel manifest.
-///
-/// `sha256` is meant to be verified by the download/install step; this crate
-/// never fetches the artifact itself.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ReleaseInfo {
     version: semver::Version,
@@ -63,6 +64,7 @@ pub struct ReleaseInfo {
     notes: String,
     sha256: Option<String>,
     date: Option<String>,
+    target: Option<String>,
 }
 
 impl ReleaseInfo {
@@ -85,6 +87,22 @@ impl ReleaseInfo {
     pub fn date(&self) -> Option<&str> {
         self.date.as_deref()
     }
+
+    pub fn target(&self) -> Option<&str> {
+        self.target.as_deref()
+    }
+}
+
+/// Rustc target triple for this binary, used to pick a row from a
+/// multi-target channel manifest.
+pub fn current_target() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+        _ => "unknown",
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +114,15 @@ struct RawManifest {
     sha256: Option<String>,
     #[serde(default)]
     date: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ManifestBody {
+    One(RawManifest),
+    Many(Vec<RawManifest>),
 }
 
 #[derive(Debug, Clone)]
@@ -150,8 +177,10 @@ impl UpdateChecker {
             .text()
             .await?;
 
-        let raw: RawManifest =
+        let body: ManifestBody =
             serde_json::from_str(&body).map_err(|e| Error::BadManifest(e.to_string()))?;
+        let raw = pick_manifest(body, current_target())
+            .ok_or_else(|| Error::BadManifest("empty update manifest".into()))?;
         let version: semver::Version = raw.version.parse()?;
 
         if version <= *current {
@@ -164,8 +193,59 @@ impl UpdateChecker {
             notes: raw.notes,
             sha256: raw.sha256,
             date: raw.date,
+            target: raw.target,
         }))
     }
+
+    /// Downloads `release.url` to `dest` and verifies `sha256` when present.
+    pub async fn download(&self, release: &ReleaseInfo, dest: &std::path::Path) -> Result<()> {
+        let bytes = self
+            .client
+            .get(release.url())
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+        if let Some(expected) = release.sha256() {
+            let got = sha256_hex(&bytes);
+            if !got.eq_ignore_ascii_case(expected) {
+                return Err(Error::Checksum {
+                    expected: expected.to_string(),
+                    got,
+                });
+            }
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(dest, bytes)?;
+        Ok(())
+    }
+}
+
+fn pick_manifest(body: ManifestBody, target: &str) -> Option<RawManifest> {
+    match body {
+        ManifestBody::One(one) => Some(one),
+        ManifestBody::Many(rows) if rows.is_empty() => None,
+        ManifestBody::Many(mut rows) => {
+            if let Some(ix) = rows
+                .iter()
+                .position(|r| r.target.as_deref() == Some(target))
+            {
+                Some(rows.swap_remove(ix))
+            } else {
+                Some(rows.swap_remove(0))
+            }
+        }
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 fn normalize_base(base: String) -> String {
@@ -312,6 +392,96 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, Error::Http(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn multi_target_manifest_picks_matching_row() {
+        let body = serde_json::json!([
+            {
+                "version": "1.2.3",
+                "url": "https://dl.example/linux.tar.gz",
+                "notes": "linux",
+                "target": "x86_64-unknown-linux-gnu"
+            },
+            {
+                "version": "1.2.3",
+                "url": "https://dl.example/mac.zip",
+                "notes": "mac",
+                "sha256": "abc",
+                "target": current_target()
+            }
+        ])
+        .to_string();
+        let server = serve("/stable.json", 200, body).await;
+        let checker = UpdateChecker::new(server.uri());
+        let release = checker
+            .check(Channel::Stable, &semver::Version::new(1, 0, 0))
+            .await
+            .unwrap()
+            .expect("newer");
+        let target = current_target();
+        let (expected_url, expected_sha) = if target == "x86_64-unknown-linux-gnu" {
+            ("https://dl.example/linux.tar.gz", None)
+        } else {
+            ("https://dl.example/mac.zip", Some("abc"))
+        };
+        assert_eq!(release.url(), expected_url);
+        assert_eq!(release.target(), Some(target));
+        assert_eq!(release.sha256(), expected_sha);
+    }
+
+    #[tokio::test]
+    async fn download_writes_file_and_checks_sha256() {
+        let payload = b"chmonitor-update-bytes";
+        let digest = sha256_hex(payload);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/pkg.zip"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(payload.as_slice()))
+            .mount(&server)
+            .await;
+        let checker = UpdateChecker::new(server.uri());
+        let release = ReleaseInfo {
+            version: semver::Version::new(1, 2, 3),
+            url: format!("{}/pkg.zip", server.uri()),
+            notes: String::new(),
+            sha256: Some(digest),
+            date: None,
+            target: None,
+        };
+        let dest = std::env::temp_dir().join(format!(
+            "chm-update-dl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        checker.download(&release, &dest).await.unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[tokio::test]
+    async fn download_rejects_bad_checksum() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/pkg.zip"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"nope"))
+            .mount(&server)
+            .await;
+        let checker = UpdateChecker::new(server.uri());
+        let release = ReleaseInfo {
+            version: semver::Version::new(1, 2, 3),
+            url: format!("{}/pkg.zip", server.uri()),
+            notes: String::new(),
+            sha256: Some("deadbeef".into()),
+            date: None,
+            target: None,
+        };
+        let dest = std::env::temp_dir().join("chm-update-bad-sha");
+        let err = checker.download(&release, &dest).await.unwrap_err();
+        assert!(matches!(err, Error::Checksum { .. }), "{err:?}");
     }
 
     #[test]

@@ -1,32 +1,36 @@
-//! Connect screen — two-mode connection form (Cloud API vs direct
-//! ClickHouse), Test (ping) and Save (writes config.toml).
-//! AGENT D OWNS THIS FILE.
-//!
-//! Flow: pick mode → fill the relevant fields → Test runs `DataSource::ping`
-//! → Save persists `[profile]` to `<config_dir>/chmonitor/config.toml` and
-//! emits [`ConnectEvent::SavedProfile`], which shell.rs turns into a live
-//! data source.
+//! Connect screen — Cloud API vs ClickHouse vs Postgres, Test (ping) and Save.
 
-use bezel::gpui::{
+use gpui::{
     AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString,
-    div, prelude::*, px,
+    Window, div, prelude::*, px,
 };
-use bezel::theme::Theme;
-use bezel::ui::input::TextField;
-use bezel::ui::widgets::{ButtonStyle, Buttons};
+use gpui_component::{
+    ActiveTheme as _, h_flex,
+    input::{Input, InputState},
+    v_flex,
+};
 
-use crate::shell::{ProfileConfig, config_path, source_from_profile};
+use crate::widgets::controls::{choice_radio, ghost_button, primary_button, radio_group};
+
+use crate::config::{
+    DEFAULT_HOST_ID, ProfileConfig, host_id_from_name, load_config, save_config,
+    source_from_profile,
+};
 
 /// Fired after Save successfully writes config.toml.
 #[derive(Debug, Clone)]
 pub enum ConnectEvent {
-    SavedProfile(ProfileConfig),
+    SavedProfile {
+        profile: ProfileConfig,
+        host_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Cloud,
-    Direct,
+    ClickHouse,
+    Postgres,
 }
 
 /// Outcome of the last Test press.
@@ -41,53 +45,101 @@ enum TestState {
 pub struct ConnectFlow {
     focus: FocusHandle,
     mode: Mode,
-    base_url: Entity<TextField>,
-    api_key: Entity<TextField>,
-    url: Entity<TextField>,
-    user: Entity<TextField>,
-    password: Entity<TextField>,
+    base_url: Entity<InputState>,
+    api_key: Entity<InputState>,
+    url: Entity<InputState>,
+    user: Entity<InputState>,
+    password: Entity<InputState>,
+    database: Entity<InputState>,
+    name: Entity<InputState>,
     test: TestState,
 }
 
 impl EventEmitter<ConnectEvent> for ConnectFlow {}
 
 impl Focusable for ConnectFlow {
-    fn focus_handle(&self, _: &bezel::gpui::App) -> FocusHandle {
+    fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
         self.focus.clone()
     }
 }
 
 impl ConnectFlow {
     /// `initial` prefills the form from a saved profile, if any.
-    pub fn new(initial: Option<ProfileConfig>, cx: &mut Context<Self>) -> Self {
-        let field = |text: Option<String>, placeholder: &'static str, cx: &mut Context<Self>| {
+    pub fn new(
+        initial: Option<ProfileConfig>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let field = |text: Option<String>,
+                     placeholder: &'static str,
+                     masked: bool,
+                     window: &mut Window,
+                     cx: &mut Context<Self>| {
             cx.new(|cx| {
-                let mut f = TextField::new(cx).with_placeholder(placeholder);
+                let mut f = InputState::new(window, cx).placeholder(placeholder);
                 if let Some(t) = text.filter(|t| !t.is_empty()) {
-                    f.set_content(t, cx);
+                    f = f.default_value(t);
+                }
+                if masked {
+                    f = f.masked(true);
                 }
                 f
             })
         };
         let initial = initial.unwrap_or_default();
         let mode = match initial.mode.as_deref() {
-            Some("clickhouse") => Mode::Direct,
+            Some("clickhouse") => Mode::ClickHouse,
+            Some("postgres") => Mode::Postgres,
             _ => Mode::Cloud,
+        };
+        let default_user = match mode {
+            Mode::Postgres => "postgres",
+            _ => "default",
         };
         Self {
             focus: cx.focus_handle(),
             mode,
-            base_url: field(initial.base_url, "https://acme.dash.chmonitor.dev", cx),
-            api_key: field(initial.api_key, "API key", cx),
-            url: field(initial.url, "http://localhost:8123", cx),
-            user: field(initial.user.or(Some("default".into())), "user", cx),
-            password: field(initial.password, "password", cx),
+            base_url: field(
+                initial.base_url,
+                "https://acme.dash.chmonitor.dev",
+                false,
+                window,
+                cx,
+            ),
+            api_key: field(initial.api_key, "API key", true, window, cx),
+            url: field(
+                initial.url,
+                if matches!(mode, Mode::Postgres) {
+                    "postgres://localhost:5432/postgres"
+                } else {
+                    "http://localhost:8123"
+                },
+                false,
+                window,
+                cx,
+            ),
+            user: field(
+                initial.user.or(Some(default_user.into())),
+                "user",
+                false,
+                window,
+                cx,
+            ),
+            password: field(initial.password, "password", true, window, cx),
+            database: field(
+                initial.database.or(Some("postgres".into())),
+                "database",
+                false,
+                window,
+                cx,
+            ),
+            name: field(None, "work (optional)", false, window, cx),
             test: TestState::Idle,
         }
     }
 
-    fn read(e: &Entity<TextField>, cx: &Context<Self>) -> String {
-        e.read(cx).content().trim().to_string()
+    fn read(e: &Entity<InputState>, cx: &Context<Self>) -> String {
+        e.read(cx).value().trim().to_string()
     }
 
     /// Collect the form into a profile. Returns None when fields required by
@@ -106,13 +158,24 @@ impl ConnectFlow {
                     ..ProfileConfig::default()
                 })
             }
-            Mode::Direct => {
+            Mode::ClickHouse => {
                 let url = nonempty(Self::read(&self.url, cx))?;
                 Some(ProfileConfig {
                     mode: Some("clickhouse".into()),
                     url: Some(url),
                     user: nonempty(Self::read(&self.user, cx)),
                     password: nonempty(Self::read(&self.password, cx)),
+                    ..ProfileConfig::default()
+                })
+            }
+            Mode::Postgres => {
+                let url = nonempty(Self::read(&self.url, cx))?;
+                Some(ProfileConfig {
+                    mode: Some("postgres".into()),
+                    url: Some(url),
+                    user: nonempty(Self::read(&self.user, cx)),
+                    password: nonempty(Self::read(&self.password, cx)),
+                    database: nonempty(Self::read(&self.database, cx)),
                     ..ProfileConfig::default()
                 })
             }
@@ -151,225 +214,144 @@ impl ConnectFlow {
             cx.notify();
             return;
         };
-        // Preserve anything outside [profile] (e.g. [telemetry]) if a config
-        // already exists; otherwise start from defaults.
-        let mut cfg = config_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|text| toml::from_str::<crate::shell::ConfigFile>(&text).ok())
-            .unwrap_or_default();
-        cfg.profile = profile.clone();
-        let out = match toml::to_string_pretty(&cfg) {
-            Ok(out) => out,
-            Err(e) => {
-                self.test = TestState::Failed(format!("serialize failed: {e}"));
-                cx.notify();
-                return;
-            }
-        };
-        let Some(path) = config_path() else {
-            self.test = TestState::Failed("no config directory on this platform".into());
-            cx.notify();
-            return;
-        };
-        if let Some(parent) = path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            self.test = TestState::Failed(format!("mkdir failed: {e}"));
-            cx.notify();
-            return;
+        let host_id = host_id_from_name(&Self::read(&self.name, cx));
+        let mut cfg = load_config();
+        if host_id == DEFAULT_HOST_ID {
+            cfg.profile = profile.clone();
+        } else {
+            cfg.profiles.insert(host_id.clone(), profile.clone());
         }
-        match std::fs::write(&path, out) {
+        cfg.ui.host = Some(host_id.clone());
+        match save_config(&cfg) {
             Ok(()) => {
                 self.test = TestState::Ok;
-                cx.emit(ConnectEvent::SavedProfile(profile));
+                cx.emit(ConnectEvent::SavedProfile { profile, host_id });
                 cx.notify();
             }
             Err(e) => {
-                self.test = TestState::Failed(format!("write failed: {e}"));
+                self.test = TestState::Failed(e);
                 cx.notify();
             }
         }
     }
 
-    // -- rendering ----------------------------------------------------------
-
     fn mode_row(
         &self,
-        theme: &Theme,
         label: &'static str,
         hint: &'static str,
         mode: Mode,
         cx: &mut Context<Self>,
-    ) -> bezel::gpui::Stateful<bezel::gpui::Div> {
+    ) -> impl IntoElement {
         let selected = self.mode == mode;
-        div()
-            .id(SharedString::from(format!("mode-{label}")))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(10.0))
-            .px(px(12.0))
-            .py(px(10.0))
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(if selected {
-                theme.border_strong
-            } else {
-                theme.border
-            })
-            .bg(if selected {
-                theme.element_active
-            } else {
-                theme.input_bg
-            })
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.element_hover))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.mode = mode;
-                this.test = TestState::Idle;
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .size(px(14.0))
-                    .rounded_full()
-                    .border_1()
-                    .border_color(theme.border_strong)
-                    .when(selected, |dot| dot.bg(theme.accent)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(div().text_size(px(13.0)).child(label))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_muted)
-                            .child(hint),
-                    ),
-            )
+        let entity = cx.entity().downgrade();
+        choice_radio(format!("mode-{label}"), selected, label, hint, cx).on_change(
+            move |next, _, _, cx| {
+                if next {
+                    let _ = entity.update(cx, |this, cx| {
+                        this.mode = mode;
+                        this.test = TestState::Idle;
+                        cx.notify();
+                    });
+                }
+            },
+        )
     }
 
-    fn field_row(label: &'static str, field: &Entity<TextField>) -> bezel::gpui::Div {
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .child(
-                div()
-                    .text_size(px(11.5))
-                    .text_color(bezel::theme::ink(0.55))
-                    .child(label),
-            )
-            .child(field.clone())
+    fn field_row(label: &'static str, field: &Entity<InputState>) -> impl IntoElement {
+        v_flex()
+            .gap_1()
+            .child(div().text_sm().child(label))
+            .child(Input::new(field))
     }
 
-    fn status_line(&self, cx: &Context<Self>) -> bezel::gpui::AnyElement {
-        let theme = Theme::of(cx).clone();
-        let (text, color): (&str, bezel::gpui::Hsla) = match &self.test {
-            TestState::Idle => ("", theme.text_faint),
-            TestState::Testing => ("testing…", theme.warning),
-            TestState::Ok => ("connection ok", theme.success),
-            TestState::Failed(e) => (e.as_str(), theme.danger),
+    fn status_line(&self, cx: &Context<Self>) -> impl IntoElement {
+        let (text, color) = match &self.test {
+            TestState::Idle => ("", cx.theme().muted_foreground),
+            TestState::Testing => ("testing…", cx.theme().warning),
+            TestState::Ok => ("connection ok", cx.theme().green),
+            TestState::Failed(e) => (e.as_str(), cx.theme().danger),
         };
         div()
-            .min_h(px(18.0))
-            .text_size(px(12.0))
+            .min_h(px(18.))
+            .text_sm()
             .text_color(color)
             .child(SharedString::from(text.to_string()))
-            .into_any_element()
     }
 }
 
 impl Render for ConnectFlow {
-    fn render(
-        &mut self,
-        _window: &mut bezel::gpui::Window,
-        cx: &mut Context<Self>,
-    ) -> impl bezel::gpui::IntoElement {
-        let theme = Theme::of(cx).clone();
-        let (cloud_fields, direct_fields) = match self.mode {
-            Mode::Cloud => (
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.0))
-                    .child(Self::field_row("Base URL", &self.base_url))
-                    .child(Self::field_row("API key", &self.api_key)),
-                div(),
-            ),
-            Mode::Direct => (
-                div(),
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.0))
-                    .child(Self::field_row("URL", &self.url))
-                    .child(Self::field_row("User", &self.user))
-                    .child(Self::field_row("Password", &self.password)),
-            ),
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let fields = match self.mode {
+            Mode::Cloud => v_flex()
+                .gap_3()
+                .child(Self::field_row("Base URL", &self.base_url))
+                .child(Self::field_row("API key", &self.api_key)),
+            Mode::ClickHouse => v_flex()
+                .gap_3()
+                .child(Self::field_row("URL", &self.url))
+                .child(Self::field_row("User", &self.user))
+                .child(Self::field_row("Password", &self.password)),
+            Mode::Postgres => v_flex()
+                .gap_3()
+                .child(Self::field_row("URL", &self.url))
+                .child(Self::field_row("User", &self.user))
+                .child(Self::field_row("Password", &self.password))
+                .child(Self::field_row("Database", &self.database)),
         };
 
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(14.0))
-            .max_w(px(460.0))
+        v_flex()
+            .gap_4()
+            .max_w(px(460.))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(div().text_size(px(16.0)).child("Connect to ClickHouse"))
+                v_flex()
+                    .gap_1()
+                    .child(div().text_lg().child("Add a host"))
                     .child(
                         div()
-                            .text_size(px(12.0))
-                            .text_color(theme.text_muted)
-                            .child("Use the chmonitor cloud API or talk to your server directly."),
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("ClickHouse, Postgres, or the chmonitor cloud API."),
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
+                radio_group("connect-mode")
                     .child(self.mode_row(
-                        &theme,
                         "Cloud",
                         "chmonitor-hosted dashboard API · base URL + API key",
                         Mode::Cloud,
                         cx,
                     ))
                     .child(self.mode_row(
-                        &theme,
-                        "Direct",
-                        "ClickHouse HTTP endpoint · url + user + password",
-                        Mode::Direct,
+                        "ClickHouse",
+                        "HTTP endpoint · url + user + password",
+                        Mode::ClickHouse,
+                        cx,
+                    ))
+                    .child(self.mode_row(
+                        "Postgres",
+                        "libpq endpoint · url + user + password + database",
+                        Mode::Postgres,
                         cx,
                     )),
             )
-            .child(cloud_fields)
-            .child(direct_fields)
+            .child(fields)
+            .child(Self::field_row("Name", &self.name))
             .child(self.status_line(cx))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(8.0))
+            .child({
+                let entity = cx.entity().downgrade();
+                h_flex()
+                    .gap_2()
+                    .child(ghost_button("test", "Test", cx).on_click({
+                        let entity = entity.clone();
+                        move |_, _, cx| {
+                            let _ = entity.update(cx, |this, cx| this.run_test(cx));
+                        }
+                    }))
                     .child(
-                        theme
-                            .button("Test", ButtonStyle::Ghost, None)
-                            .id("test")
-                            .on_click(cx.listener(|this, _, _, cx| this.run_test(cx))),
+                        primary_button("save", "Save", cx).on_click(move |_, _, cx| {
+                            let _ = entity.update(cx, |this, cx| this.save(cx));
+                        }),
                     )
-                    .child(
-                        theme
-                            .button("Save", ButtonStyle::Prominent, None)
-                            .id("save")
-                            .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-                    ),
-            )
+            })
     }
 }

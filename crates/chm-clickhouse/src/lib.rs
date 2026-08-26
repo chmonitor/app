@@ -83,15 +83,25 @@ ORDER BY elapsed DESC
 LIMIT 100"#;
 
 /// chmonitor dashboard overview headline block.
+/// Running / schema counts match `apps/dashboard/src/lib/api/charts/overview-charts.ts`.
 pub const Q_OVERVIEW_MAIN: &str = r#"
 SELECT
-  (SELECT count() FROM system.processes) AS running_queries,
+  (SELECT count() FROM system.processes WHERE is_cancelled = 0) AS running_queries,
   (SELECT count() FROM system.merges) + (SELECT countIf(NOT is_done) FROM system.mutations) AS active_merges,
-  (SELECT count() FROM system.tables) AS tables_total,
+  (SELECT countDistinct(database) FROM system.tables
+     WHERE lower(database) NOT IN ('system', 'information_schema')) AS databases_total,
+  (SELECT countDistinct(format('{}.{}', database, name)) FROM system.tables
+     WHERE lower(database) NOT IN ('system', 'information_schema')) AS tables_total,
   (SELECT count() FROM system.parts WHERE active) AS parts_total,
   (SELECT coalesce(sum(bytes_on_disk), 0) FROM system.parts WHERE active) AS disk_used_bytes,
   uptime() AS uptime_seconds,
   version() AS clickhouse_version"#;
+
+/// Dashboard `query-count-today`: QueryFinish rows since local midnight.
+pub const Q_OVERVIEW_TODAY: &str = r#"
+SELECT count() AS v
+FROM system.query_log
+WHERE type = 'QueryFinish' AND toDate(event_time) = today()"#;
 
 /// qps denominator comes from the caller-selected range window.
 pub const Q_OVERVIEW_QPS: &str = r#"
@@ -298,6 +308,7 @@ impl DataSource for ClickHouseClient {
                 .await?;
             let reps: Vec<raw::ReplicaCounts> = self.query_rows(Q_OVERVIEW_REPLICAS).await?;
             let disk_total_bytes = self.scalar_u64(Q_OVERVIEW_DISKS).await?;
+            let queries_today = self.scalar_u64(Q_OVERVIEW_TODAY).await.unwrap_or(0);
 
             let main = main.into_iter().next().unwrap_or_default();
             let qps_row = qps_row.into_iter().next().unwrap_or_default();
@@ -319,6 +330,8 @@ impl DataSource for ClickHouseClient {
                 disk_total_bytes,
                 uptime_seconds: main.uptime_seconds,
                 clickhouse_version: main.clickhouse_version,
+                databases_total: main.databases_total,
+                queries_today,
             })
         })
     }
@@ -596,6 +609,8 @@ mod raw {
         #[serde(default)]
         pub active_merges: u64,
         #[serde(default)]
+        pub databases_total: u64,
+        #[serde(default)]
         pub tables_total: u64,
         #[serde(default)]
         pub parts_total: u64,
@@ -781,6 +796,15 @@ mod sql_snapshots {
         assert!(Q_RUNNING.contains("normalizeQuery(query) AS normalized_query"));
         assert!(Q_RUNNING.contains("ORDER BY elapsed DESC"));
         assert!(Q_RUNNING.contains("LIMIT 100"));
+    }
+
+    #[test]
+    fn overview_main_matches_dashboard_kpis() {
+        assert!(Q_OVERVIEW_MAIN.contains("FROM system.processes WHERE is_cancelled = 0"));
+        assert!(Q_OVERVIEW_MAIN.contains("NOT IN ('system', 'information_schema')"));
+        assert!(Q_OVERVIEW_MAIN.contains("AS databases_total"));
+        assert!(Q_OVERVIEW_TODAY.contains("toDate(event_time) = today()"));
+        assert!(Q_OVERVIEW_TODAY.contains("type = 'QueryFinish'"));
     }
 
     #[test]
@@ -1165,11 +1189,12 @@ mod wiremock_tests {
 
     fn overview_routes() -> Vec<(&'static str, String)> {
         vec![
-            ("uptime()", r#"{"running_queries":12,"active_merges":5,"tables_total":142,"parts_total":8931,"disk_used_bytes":549755813888,"uptime_seconds":1036800,"clickhouse_version":"25.3.1.1"}"#.to_string()),
+            ("uptime()", r#"{"running_queries":12,"active_merges":5,"databases_total":8,"tables_total":142,"parts_total":8931,"disk_used_bytes":549755813888,"uptime_seconds":1036800,"clickhouse_version":"25.3.1.1"}"#.to_string()),
             ("countIf(type = 'QueryStart')", r#"{"started_queries":462000}"#.to_string()),
             ("countIf(exception != '')", r#"{"slow_queries_24h":37,"failed_queries_24h":3}"#.to_string()),
             ("FROM system.replicas", r#"{"replicas_ok":3,"replicas_total":3}"#.to_string()),
             ("FROM system.disks", r#"{"v":1099511627776}"#.to_string()),
+            ("toDate(event_time) = today()", r#"{"v":48210}"#.to_string()),
         ]
     }
 
@@ -1179,6 +1204,8 @@ mod wiremock_tests {
         let o = c.overview(TimeRange::SixHours).await.expect("overview");
         assert_eq!(o.running_queries, 12);
         assert_eq!(o.active_merges, 5);
+        assert_eq!(o.databases_total, 8);
+        assert_eq!(o.queries_today, 48_210);
         assert_eq!(o.tables_total, 142);
         assert_eq!(o.parts_total, 8931);
         assert_eq!(o.disk_used_bytes, 512 << 30);

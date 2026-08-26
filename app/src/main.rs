@@ -1,23 +1,33 @@
-//! Entry point — bezel bootstrap (mirrors bezel `apps/hello` exactly).
-//!
-//! Bootstrap quirks worth remembering:
-//! * This gpui fork has no `Application::new()`; the platform facade
-//!   `gpui_platform::application()` is the only entry.
-//! * A gpui app gets no menu bar for free (no nib), so without a Quit
-//!   menu item `cmd-q` does nothing.
-//! * Fonts must be registered before the first window paints.
+//! Entry point — gpui-component bootstrap.
 
-use bezel::gpui::{
-    App, AppContext as _, Bounds, Focusable as _, Menu, MenuItem, SharedString, TitlebarOptions,
+use chm_app::config::{Cli, CliError, load_config};
+use chm_app::pages::settings::{appearance_from_cfg, apply_appearance};
+use chm_app::shell::{OpenSettings, Refresh, Shell, ToggleSidebar};
+use gpui::{
+    App, AppContext as _, Bounds, Focusable as _, KeyBinding, Menu, MenuItem, TitlebarOptions,
     WindowBounds, WindowOptions, actions, px, size,
 };
-use bezel::theme;
-use bezel::ui;
-use chm_app::shell::Shell;
+use gpui_component::{Root, TitleBar};
 
 actions!(chm_app, [Quit]);
 
 fn main() {
+    match Cli::parse(std::env::args().skip(1)) {
+        Ok(cli) => chm_app::config::install_cli(cli),
+        Err(CliError::Help) => {
+            print!("{}", chm_app::config::HELP);
+            return;
+        }
+        Err(CliError::Version) => {
+            println!("chm-app {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Err(CliError::Unknown(arg)) => {
+            eprintln!("unknown argument: {arg}\n{}", chm_app::config::HELP);
+            std::process::exit(2);
+        }
+    }
+
     // Smoke gate: prove init runs to completion headless before any window is
     // opened. CHM_SMOKE also selects MockDataSource inside Shell (see shell.rs).
     let smoke = std::env::var("CHM_SMOKE").is_ok();
@@ -25,41 +35,60 @@ fn main() {
         println!("shell ready");
     }
 
-    gpui_platform::application().run(|cx: &mut App| {
-        if let Err(err) = ui::register_fonts(cx) {
-            eprintln!("FONT REGISTRATION FAILED: {err:?}");
-        }
-        theme::appearance::init(theme::appearance::AppearanceMode::System, cx);
-        // TextField keybindings are opt-in and scoped to the field's key context.
-        ui::input::init(cx);
-        // Without a menu item cmd-q does nothing — no nib ships with a gpui app.
-        cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
-        cx.set_menus(vec![
-            Menu::new("chmonitor").items([MenuItem::action("Quit", Quit)]),
-        ]);
+    gpui_platform::application()
+        .with_assets(gpui_component_assets::Assets)
+        .run(|cx: &mut App| {
+            // gpui_component::init includes gpui_base::init (theme tokens,
+            // scrollbars, focus). Application-owned controls are gpui-base
+            // primitives styled from the theme; charts/sidebar stay on the
+            // styled façade.
+            gpui_component::init(cx);
+            cx.bind_keys([
+                KeyBinding::new("cmd-,", OpenSettings, None),
+                KeyBinding::new("cmd-b", ToggleSidebar, None),
+                KeyBinding::new("cmd-r", Refresh, None),
+                KeyBinding::new("cmd-q", Quit, None),
+            ]);
+            // Without a menu item cmd-q does nothing — no nib ships with a gpui app.
+            cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+            cx.set_menus(vec![
+                Menu::new("chmonitor").items(vec![
+                    MenuItem::action("Settings…", OpenSettings),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit", Quit),
+                ]),
+                Menu::new("View").items(vec![
+                    MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                    MenuItem::action("Refresh", Refresh),
+                ]),
+            ]);
 
-        let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(SharedString::from("chmonitor")),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            |window, cx| {
-                // Follow system light/dark for this window (bezel README step).
-                theme::appearance::observe_window(window, cx).detach();
-                let shell = cx.new(Shell::new);
-                // Root takes focus so 1-8 / r keys land in the shell's subtree
-                // from the first frame (gallery's pattern).
-                let focus = shell.read(cx).focus_handle(cx);
-                window.focus(&focus, cx);
-                shell
-            },
-        )
-        .unwrap(); // unwrap allowed here: same bootstrap shape as bezel examples
-        cx.activate(true);
-    });
+            let appearance = appearance_from_cfg(load_config().ui.appearance.as_deref());
+            let bounds = Bounds::centered(None, size(px(1100.0), px(720.0)), cx);
+            // Title the window: on X11 gpui only writes WM_NAME/_NET_WM_NAME
+            // when `titlebar.title` is set, and TitleBar::window_options()
+            // leaves it None — an untitled window is invisible to WMs,
+            // taskbars, and scripts/smoke.sh name matching.
+            let mut options = TitleBar::window_options();
+            options.titlebar = Some(TitlebarOptions {
+                title: Some("chmonitor".into()),
+                ..options.titlebar.take().unwrap_or_default()
+            });
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(720.0), px(480.0))),
+                    ..options
+                },
+                move |window, cx| {
+                    apply_appearance(appearance, window, cx);
+                    let shell = cx.new(|cx| Shell::new(window, cx));
+                    let focus = shell.read(cx).focus_handle(cx);
+                    window.focus(&focus, cx);
+                    cx.new(|cx| Root::new(shell, window, cx))
+                },
+            )
+            .unwrap();
+            cx.activate(true);
+        });
 }

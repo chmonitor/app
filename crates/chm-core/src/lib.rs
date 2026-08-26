@@ -41,6 +41,26 @@ pub enum DataSourceError {
 
 pub type Result<T> = std::result::Result<T, DataSourceError>;
 
+/// What kind of database a host speaks. Orthogonal to *where* credentials live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceEngine {
+    ClickHouse,
+    Cloud,
+    Postgres,
+    Mock,
+}
+
+impl SourceEngine {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::ClickHouse => "ch",
+            Self::Cloud => "cloud",
+            Self::Postgres => "pg",
+            Self::Mock => "mock",
+        }
+    }
+}
+
 /// Dashboard time ranges (matches web UI: 1h/6h/24h/7d/30d).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimeRange {
@@ -109,6 +129,9 @@ pub struct TrafficSeries {
 }
 
 /// Headline numbers for the overview page.
+///
+/// The four dashboard KPIs on dash.chmonitor.dev are running queries
+/// (with queries today), schema (databases + tables), storage, and uptime.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Overview {
     pub qps: f64,
@@ -124,6 +147,12 @@ pub struct Overview {
     pub disk_total_bytes: u64,
     pub uptime_seconds: u64,
     pub clickhouse_version: String,
+    /// User databases, excluding `system` / `information_schema`.
+    #[serde(default)]
+    pub databases_total: u64,
+    /// QueryFinish rows on `today()` (dashboard `query-count-today`).
+    #[serde(default)]
+    pub queries_today: u64,
 }
 
 /// One query row (list views for running/slow/failed).
@@ -199,6 +228,12 @@ pub trait DataSource: Send + Sync {
     /// Human-readable label for status bar, e.g. "cloud: acme.dash.chmonitor.dev".
     fn label(&self) -> String;
 
+    /// Engine for this source. Defaults to ClickHouse so existing clients
+    /// stay fail-closed.
+    fn engine(&self) -> SourceEngine {
+        SourceEngine::ClickHouse
+    }
+
     /// Cheap connectivity/auth probe used by Connect screen and reconnects.
     async fn ping(&self) -> Result<()>;
 
@@ -233,6 +268,10 @@ impl DataSource for MockDataSource {
         self.label.clone()
     }
 
+    fn engine(&self) -> SourceEngine {
+        SourceEngine::Mock
+    }
+
     async fn ping(&self) -> Result<()> {
         Ok(())
     }
@@ -252,6 +291,8 @@ impl DataSource for MockDataSource {
             disk_total_bytes: 1024_u64 * 1024 * 1024 * 1024,
             uptime_seconds: 86_400 * 12,
             clickhouse_version: "25.3.1.1 (smoke)".into(),
+            databases_total: 8,
+            queries_today: 48_210,
         };
         // Vary by range so charts differ across selections in smoke shots.
         let mut o = base;
@@ -424,6 +465,8 @@ fn row_query(id: &str, user: &str, elapsed_ms: f64, mem: u64, sql: &str) -> Quer
 
 fn rep(name: &str, ro: bool, delay: f64) -> ReplicaRow {
     ReplicaRow {
+        database: "events".into(),
+        table: "clicks".into(),
         replica_name: name.into(),
         is_readonly: ro,
         absolute_delay_sec: delay,
@@ -539,6 +582,8 @@ mod tests {
             assert_eq!(o.replicas_ok, 3);
             assert_eq!(o.replicas_total, 3);
             assert_eq!(o.tables_total, 142);
+            assert_eq!(o.databases_total, 8);
+            assert_eq!(o.queries_today, 48_210);
             assert_eq!(o.parts_total, 8931);
             assert_eq!(o.disk_used_bytes, 512 * 1024 * 1024 * 1024);
             assert_eq!(o.disk_total_bytes, 1024_u64 * 1024 * 1024 * 1024);
