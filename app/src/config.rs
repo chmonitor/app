@@ -181,11 +181,33 @@ pub fn save_config(cfg: &ConfigFile) -> Result<(), String> {
 }
 
 pub fn save_config_to(path: &Path, cfg: &ConfigFile) -> Result<(), String> {
+    use std::io::Write;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
     }
     let out = toml::to_string_pretty(cfg).map_err(|e| format!("serialize failed: {e}"))?;
-    std::fs::write(path, out).map_err(|e| format!("write failed: {e}"))
+    // The file stores passwords/API keys — keep it owner-only (0600 on unix).
+    // `mode` only applies at creation, so also tighten an existing file.
+    let mut opts = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|e| format!("open failed: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(path, perms).map_err(|e| format!("chmod failed: {e}"))?;
+    }
+    f.write_all(out.as_bytes())
+        .map_err(|e| format!("write failed: {e}"))
 }
 
 /// Load `[profile]` or `[profiles.<named>]` from an explicit path.
@@ -430,6 +452,22 @@ mod tests {
         let path = dir.join(format!("{n}.toml"));
         std::fs::write(&path, body).unwrap();
         path
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn saved_config_is_owner_only() {
+        // The file stores passwords/API keys — it must never be group/other
+        // readable, including when overwriting a pre-existing 0644 file.
+        let path = write_cfg("[profile]\nmode = \"cloud\"\n");
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+            .unwrap();
+        let cfg = load_config_from(&path);
+        save_config_to(&path, &cfg).unwrap();
+        let mode = std::os::unix::fs::PermissionsExt::mode(
+            &std::fs::metadata(&path).unwrap().permissions(),
+        );
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]
